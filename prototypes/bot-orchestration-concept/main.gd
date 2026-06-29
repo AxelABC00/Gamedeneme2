@@ -25,7 +25,7 @@ const START_WATER := 25
 const WATER_MAX := 99
 const WATER_BUNDLE := 25
 const WATER_BUNDLE_COST := 4
-const MAINT_DECAY := 1.0 / 150.0
+const MAINT_DECAY := 1.0 / 320.0
 
 # Storage / processing
 const FLOUR_VALUE := 10
