@@ -37,15 +37,30 @@ const CROPS := [
 	{"name": "Karpuz", "grow": 11.0, "value": 13, "seed": 5, "col": Color("#3FA34D")},
 ]
 
+# --- economy constants (ported) ---
+const WHEAT := 3            # CROPS index of Bugday (sold as flour when a mill exists)
+const START_COINS := 14
+const START_WATER := 25
+const WATER_MAX := 99
+const WATER_BUNDLE := 25
+const WATER_COST := 4
+const FLOUR_VALUE := 10
+const START_STORAGE := 20
+
 # --- state ---
 var rows: int
 var states: PackedInt32Array
 var grow: PackedFloat32Array
 var crop_type: PackedInt32Array
 var golden: Array = []
-# economy (ported; used from Phase C onward)
-var coins: int = 14
-var water: int = 25
+# economy (ported; drives manual work from Phase C)
+var coins: int = START_COINS
+var water: int = START_WATER
+var stock: PackedInt32Array        # harvested crops awaiting sale, per crop type
+var flour: int = 0
+var harvested: int = 0
+var storage_cap: int = START_STORAGE
+var selected_seed: int = WHEAT     # which crop a tap plants (HUD picker comes in Phase F)
 
 # Deterministic demo layout so the 3D view shows the FULL lifecycle at a glance
 # (one row per stage). Proves the state->3D mapping for Phase B.
@@ -55,6 +70,7 @@ func setup_demo() -> void:
 	states = PackedInt32Array(); states.resize(n)
 	grow = PackedFloat32Array(); grow.resize(n)
 	crop_type = PackedInt32Array(); crop_type.resize(n)
+	stock = PackedInt32Array(); stock.resize(CROPS.size())
 	golden.clear()
 	for i in range(n):
 		golden.append(false)
@@ -91,6 +107,89 @@ func tick(delta: float) -> bool:
 				states[i] = RIPE
 				changed = true
 	return changed
+
+# --- manual work + economy (ported from the 2D _manual cycle) ---
+# One tap advances a tile to its next state. Returns true if an action happened,
+# false if it was blocked (not enough coins/water, storage full) — the view uses
+# this to flash green/red. No rendering here.
+func manual(idx: int) -> bool:
+	match states[idx]:
+		OBSTACLE:
+			states[idx] = EMPTY
+			return true
+		EMPTY:
+			states[idx] = TILLED
+			return true
+		TILLED:
+			var sc: int = CROPS[selected_seed]["seed"]
+			if coins < sc:
+				return false
+			coins -= sc
+			states[idx] = PLANTED
+			crop_type[idx] = selected_seed
+			return true
+		PLANTED:
+			if water <= 0:
+				return false
+			water -= 1
+			states[idx] = GROWING
+			grow[idx] = 0.0
+			return true
+		GROWING:
+			grow[idx] = min(grow[idx] + 0.12, 1.0)
+			if grow[idx] >= 1.0:
+				states[idx] = RIPE
+			return true
+		RIPE:
+			if harvest_tile(idx, 5, 0.0):
+				states[idx] = EMPTY
+				return true
+			return false
+	return false
+
+func stock_total() -> int:
+	var t := 0
+	for v in stock:
+		t += v
+	return t
+
+# Multipliers are 1.0 until upgrades/buildings land (Phase E). Hook kept for parity.
+func sell_mult() -> float:
+	return 1.0
+
+func harvest_tile(idx: int, gold_mult: int, find_chance: float) -> bool:
+	var ct: int = crop_type[idx]
+	var is_gold: bool = golden[idx] or randf() < find_chance
+	if is_gold:
+		var base: int = CROPS[ct]["value"]
+		coins += int(round(float(base) * sell_mult())) * gold_mult
+		harvested += 1
+		golden[idx] = false
+		return true
+	if stock_total() >= storage_cap:
+		return false  # storage full — can't harvest plain crops
+	stock[ct] = int(stock[ct]) + 1
+	harvested += 1
+	return true
+
+# Sell all stored crops (+ flour) for coins. Returns coins earned.
+func sell_all() -> int:
+	var earned := 0
+	for ct in range(stock.size()):
+		earned += int(round(float(CROPS[ct]["value"]) * sell_mult())) * int(stock[ct])
+		stock[ct] = 0
+	earned += int(round(float(FLOUR_VALUE) * sell_mult())) * flour
+	flour = 0
+	coins += earned
+	return earned
+
+# Buy one water bundle. Returns true if affordable.
+func buy_water() -> bool:
+	if coins < WATER_COST:
+		return false
+	coins -= WATER_COST
+	water = min(water + WATER_BUNDLE, WATER_MAX)
+	return true
 
 func needs(task: int, s: int) -> bool:
 	match task:

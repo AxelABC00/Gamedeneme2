@@ -7,9 +7,13 @@ extends Node3D
 const TILE := 1.0
 
 var sim: SimState
+var _cam: Camera3D
 var _crop_nodes: Array = []          # per-tile crop Node3D (or null)
+var _soil_nodes: Array = []          # per-tile soil MeshInstance3D
+var _rock_nodes: Array = []          # per-tile obstacle rock (or null)
 var _last_state: PackedInt32Array
 var _last_bucket: PackedInt32Array   # growth bucket, to know when to rebuild
+const PICK_Y := 0.10                 # soil surface height for tap raycast
 
 func _ready() -> void:
 	sim = SimState.new()
@@ -42,6 +46,78 @@ func _process(delta: float) -> void:
 		if s != _last_state[i] or bucket != _last_bucket[i]:
 			_refresh_crop(i)
 
+# ---------------------------------------------------------------- input (Phase C)
+func _unhandled_input(event: InputEvent) -> void:
+	if event is InputEventScreenTouch and event.pressed:
+		_tap(event.position)
+	elif event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT and event.pressed:
+		_tap(event.position)
+
+func _tap(screen_pos: Vector2) -> void:
+	var idx := _tile_under(screen_pos)
+	if idx < 0:
+		return
+	var ok: bool = sim.manual(idx)
+	_refresh_tile(idx)
+	_feedback(idx, ok)
+
+# Screen -> camera ray -> soil plane -> tile index (-1 if off the plot). The heart of Phase C.
+func _tile_under(screen_pos: Vector2) -> int:
+	if _cam == null:
+		return -1
+	var from: Vector3 = _cam.project_ray_origin(screen_pos)
+	var dir: Vector3 = _cam.project_ray_normal(screen_pos)
+	var plane := Plane(Vector3.UP, PICK_Y)
+	var hit = plane.intersects_ray(from, dir)
+	if hit == null:
+		return -1
+	var world: Vector3 = hit
+	var o := _origin()
+	var c := int(round((world.x - o.x) / TILE))
+	var r := int(round((world.z - o.z) / TILE))
+	if c < 0 or c >= SimState.COLS or r < 0 or r >= sim.rows:
+		return -1
+	return r * SimState.COLS + c
+
+# Rebuild every visual for one tile after its state changed (soil tint, rock, plant).
+func _refresh_tile(idx: int) -> void:
+	var soil: MeshInstance3D = _soil_nodes[idx]
+	if soil != null:
+		soil.material_override = _mat(_soil_color(sim.states[idx]), 1.0)
+	var rock: Node3D = _rock_nodes[idx]
+	if sim.states[idx] == SimState.OBSTACLE and rock == null:
+		var cr := _tile_cr(idx)
+		_add_rock(idx, _tile_pos(cr.x, cr.y), 0.10)
+	elif sim.states[idx] != SimState.OBSTACLE and rock != null:
+		rock.queue_free()
+		_rock_nodes[idx] = null
+	_refresh_crop(idx)
+
+# Quick green (ok) / red (blocked) pop so taps read clearly while testing.
+func _feedback(idx: int, ok: bool) -> void:
+	var cr := _tile_cr(idx)
+	var marker := MeshInstance3D.new()
+	var sm := SphereMesh.new()
+	sm.radius = 0.18
+	sm.height = 0.36
+	marker.mesh = sm
+	var col := Color(0.45, 0.95, 0.45) if ok else Color(0.95, 0.35, 0.30)
+	var m := _mat(col, 0.3, 0.0)
+	m.emission_enabled = true
+	m.emission = col
+	m.emission_energy_multiplier = 2.0
+	marker.material_override = m
+	add_child(marker)
+	marker.position = _tile_pos(cr.x, cr.y) + Vector3(0, 0.5, 0)
+	var tw := create_tween()
+	tw.set_parallel(true)
+	tw.tween_property(marker, "scale", Vector3(2.2, 2.2, 2.2), 0.35)
+	tw.tween_property(marker, "position:y", 1.1, 0.35)
+	var m2 := m  # fade alpha
+	m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	tw.tween_property(m2, "albedo_color:a", 0.0, 0.35)
+	tw.chain().tween_callback(marker.queue_free)
+
 # ---------------------------------------------------------------- layout
 func _origin() -> Vector3:
 	return Vector3(-(SimState.COLS - 1) * TILE * 0.5, 0.0, -(sim.rows - 1) * TILE * 0.5)
@@ -54,6 +130,9 @@ func _tile_cr(i: int) -> Vector2i:
 
 # ---------------------------------------------------------------- build
 func _build_soil_tiles() -> void:
+	var n: int = sim.states.size()
+	_soil_nodes.resize(n)
+	_rock_nodes.resize(n)
 	# Raised soil bed under the plot.
 	var bed := MeshInstance3D.new()
 	var bm := BoxMesh.new()
@@ -63,7 +142,7 @@ func _build_soil_tiles() -> void:
 	bed.position = Vector3(0, -0.04, 0)
 	add_child(bed)
 
-	for i in range(sim.states.size()):
+	for i in range(n):
 		var cr := _tile_cr(i)
 		var p := _tile_pos(cr.x, cr.y)
 		var soil := MeshInstance3D.new()
@@ -74,18 +153,23 @@ func _build_soil_tiles() -> void:
 		soil.material_override = _mat(_soil_color(sim.states[i]), 1.0)
 		soil.position = p + Vector3(0, h * 0.5, 0)
 		add_child(soil)
-		# rock on obstacle tiles
+		_soil_nodes[i] = soil
+		_rock_nodes[i] = null
 		if sim.states[i] == SimState.OBSTACLE:
-			var rock := MeshInstance3D.new()
-			var rmesh := SphereMesh.new()
-			rmesh.radius = 0.26
-			rmesh.height = 0.42
-			rmesh.radial_segments = 6
-			rmesh.rings = 3
-			rock.mesh = rmesh
-			rock.material_override = _mat(Color(0.55, 0.55, 0.52), 0.95)
-			rock.position = p + Vector3(0.0, h + 0.12, 0.0)
-			add_child(rock)
+			_add_rock(i, p, h)
+
+func _add_rock(i: int, p: Vector3, h: float) -> void:
+	var rock := MeshInstance3D.new()
+	var rmesh := SphereMesh.new()
+	rmesh.radius = 0.26
+	rmesh.height = 0.42
+	rmesh.radial_segments = 6
+	rmesh.rings = 3
+	rock.mesh = rmesh
+	rock.material_override = _mat(Color(0.55, 0.55, 0.52), 0.95)
+	rock.position = p + Vector3(0.0, h + 0.12, 0.0)
+	add_child(rock)
+	_rock_nodes[i] = rock
 
 # Build a simple procedural plant so each lifecycle stage reads clearly in 3D.
 # (Real per-stage Quaternius crop models come in Phase G — this proves the mapping.)
@@ -229,6 +313,7 @@ func _build_environment() -> void:
 	add_child(cam)
 	cam.global_position = Vector3(0.0, 12.6, 13.2)
 	cam.look_at(Vector3(0.0, 0.0, -0.4), Vector3.UP)
+	_cam = cam
 
 # ---------------------------------------------------------------- helpers
 func _tree(at: Vector3) -> void:
@@ -313,8 +398,31 @@ func _mat(col: Color, rough: float = 1.0, metal: float = 0.0) -> StandardMateria
 	return m
 
 func _shoot() -> void:
+	if OS.has_environment("TAP_TEST"):
+		_verify_taps()
 	get_tree().create_timer(2.0).timeout.connect(func() -> void:
 		var img := get_viewport().get_texture().get_image()
 		img.save_png("res://_shot_3d.png")
 		get_tree().quit()
 	)
+
+# Headless sanity check for the screen->tile->manual chain: find each tile's screen
+# position via unproject (inverse of the tap raycast), tap it, assert the round-trip.
+func _verify_taps() -> void:
+	print("=== TAP_TEST: screen->tile round-trip ===")
+	var ok := true
+	for i: int in [0, 1, sim.states.size() - 1]:  # obstacle/empty corner, neighbour, front tile
+		var cr := _tile_cr(i)
+		var world := _tile_pos(cr.x, cr.y) + Vector3(0, PICK_Y, 0)
+		var screen := _cam.unproject_position(world)
+		var got: int = _tile_under(screen)
+		var pass_i: bool = got == i
+		ok = ok and pass_i
+		print("  tile %d -> screen %s -> tile %d   %s" % [i, str(screen.round()), got, "PASS" if pass_i else "FAIL"])
+	# exercise the full action on a known tile (front row is RIPE in the demo)
+	var last := sim.states.size() - 1
+	var before_state := sim.states[last]
+	var got_action: bool = sim.manual(last)
+	_refresh_tile(last)
+	print("  manual(front RIPE tile): state %d -> %d, action=%s" % [before_state, sim.states[last], str(got_action)])
+	print("=== TAP_TEST %s ===" % ["PASS" if ok else "FAIL"])

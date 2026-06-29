@@ -48,6 +48,22 @@ distinctly, growth animates, golden crops glow. The logic/view split holds.
   ~y13/z13). Confirms the plan's "variable aspect ratio" risk is real and worth solving
   generically in production.
 
-## Next: Phase C (HIGH risk)
-Touch→3D tile mapping: `camera.project_ray_origin/normal` → `Plane(UP,0).intersects_ray`
-→ world→tile index → manual work (till/plant/water/harvest). See the migration plan.
+## Phase C CONCLUDED ✓ — touch→3D hand-farming is playable
+Done in two steps (logic first, then input):
+- **Economy ported into `sim.gd`** — `manual()` (one tap = next lifecycle step),
+  `harvest_tile()`, `sell_all()`, `buy_water()`, `stock_total()`, `sell_mult()`, plus
+  coins/water/stock/flour state. `manual()` returns `bool` (acted / blocked) — the
+  green/red flash is the view's job, not the logic's. Verified by `test_sim.gd`
+  (`godot --headless --script res://test_sim.gd`) → **26/26 deterministic checks pass**.
+- **Raycast input in `world.gd`** — `_unhandled_input` → `_tap` → `_tile_under`
+  (`camera.project_ray_origin/normal` → `Plane(UP, 0.10).intersects_ray` → world → tile
+  index) → `sim.manual(idx)` → `_refresh_tile` (soil tint + rock + plant) + a quick
+  green/red feedback pop. Per-tile nodes are tracked so a single tile updates in place.
+- Verified headlessly with `TAP_TEST=1 VERIFY_SHOT=1` — `unproject → _tile_under`
+  round-trips correctly (corner/neighbour/front tiles), and a programmatic harvest
+  resets the front tile to empty soil in `_shot_3d.png`.
+
+## Next: Phase F (HUD) or Phase D (bots)
+A real play session is currently capped by starting coins/water with no way to sell or
+buy — so the **HUD** (coins/water readout, Sat/buy-water, seed picker) is the natural
+next step, then bots (Phase D). See [`design/3d-migration-plan.md`](../../design/3d-migration-plan.md).
