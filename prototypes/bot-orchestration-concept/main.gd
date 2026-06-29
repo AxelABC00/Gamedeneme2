@@ -6,13 +6,16 @@
 # v8: 4th crop (Bugday) + Degirmen processing chain (wheat->flour), Depo/storage + Sat,
 #     otomatik Su Kuyusu (passive water), Altin Avcisi bot, random events (Yagmur/UFO/Tuccar/Kuslar),
 #     HUD shortcuts (+Su, Sat). Art/UI direction (cozy 3D look) is a LATER art phase.
+# v9: scene layout - farmhouse/windmill/well/depot drawn as tappable buildings at top,
+#     smaller centered field below, bottom control bar. Tap well=+Su, depot=Sat,
+#     farmhouse=Magaza, windmill=Ciftlik tab. Bot zones editable (Boya/Sil toggle).
+#     Trader is now a real cart that rolls in and out (driven by sell_boost_t).
 # Date: 2026-06-29
 extends Node2D
 
 const COLS := 5
 const START_ROWS := 6
 const MAX_ROWS := 8
-const TOP_MARGIN := 150.0
 const BOT_SPEED := 160.0
 const WORK_TIME := 0.25
 const MAX_BOTS := 14
@@ -41,6 +44,15 @@ const UFO_DUR := 5.5
 const BIRDS_DUR := 4.0
 const BIRD_COUNT := 6
 const SCARECROW_MAX := 5
+const SELL_BOOST_DUR := 18.0
+
+# Layout (v9: farm/well/depot/mill at top, field below, controls at bottom)
+const HOME_Y0 := 46.0       # top of homestead band (below the slim HUD bar)
+const HOME_H := 120.0       # homestead band height
+const FIELD_MARGIN := 14.0  # min horizontal margin around the field
+const TILE_CAP := 66.0      # max tile size (keeps tiles small)
+const BOTTOM_BAR_H := 98.0  # bottom control bar (seeds + tools)
+const ERASE_W := 84.0       # erase-toggle button width
 
 # Tile lifecycle
 const EMPTY := 0
@@ -136,6 +148,7 @@ var water: int = 0
 var selected_seed: int = 0
 var current_tool: int = -1
 var painting: bool = false
+var erase_mode: bool = false
 var store_open: bool = false
 var store_tab: int = 0
 var clock: float = 0.0
@@ -171,12 +184,17 @@ var scarecrow_charges: int = 0
 func _ready() -> void:
 	randomize()
 	var vp := get_viewport_rect().size
-	tile = vp.x / float(COLS)
 	rows = START_ROWS
 	coins = START_COINS
 	water = START_WATER
 	storage_cap = 30
-	origin = Vector2(0.0, TOP_MARGIN)
+	# Field sits below the homestead band, centered, with small tiles.
+	var field_top := HOME_Y0 + HOME_H + 8.0
+	var avail_h: float = (vp.y - BOTTOM_BAR_H) - field_top - 6.0
+	var t_w: float = (vp.x - 2.0 * FIELD_MARGIN) / float(COLS)
+	var t_h: float = avail_h / float(MAX_ROWS)
+	tile = min(min(t_w, t_h), TILE_CAP)
+	origin = Vector2((vp.x - tile * float(COLS)) * 0.5, field_top)
 	event_timer = randf_range(EVENT_MIN, EVENT_MAX)
 	stock.clear()
 	for _c in range(CROPS.size()):
@@ -227,9 +245,9 @@ func _tile_center(idx: int) -> Vector2:
 	return origin + Vector2((c + 0.5) * tile, (r + 0.5) * tile)
 
 func _tile_at(pos: Vector2) -> int:
-	if pos.y < origin.y or pos.x < 0.0 or pos.x > COLS * tile:
+	if pos.y < origin.y or pos.x < origin.x or pos.x > origin.x + COLS * tile:
 		return -1
-	var c := int(pos.x / tile)
+	var c := int((pos.x - origin.x) / tile)
 	var r := int((pos.y - origin.y) / tile)
 	if r < 0 or r >= rows or c < 0 or c >= COLS:
 		return -1
@@ -489,7 +507,7 @@ func _trigger_event() -> void:
 			ufo_target = randi() % states.size()
 			event_text = "UFO geldi! Tarla cemberi - altin urunler!"
 		2:
-			sell_boost_t = 18.0
+			sell_boost_t = SELL_BOOST_DUR
 			event_text = "Gezgin tuccar geldi! Satis x1.5 (18 sn)"
 		3:
 			birds_active = true
@@ -806,32 +824,51 @@ func _buy_item(id: int) -> bool:
 
 # ---- HUD rects ----
 
-func _shop_btn_rect() -> Rect2:
+func _home_rects() -> Dictionary:
+	# Homestead band: farmhouse | windmill | well | depot, left to right.
 	var vp := get_viewport_rect().size
-	return Rect2(vp.x - 92.0, 8.0, 84.0, 34.0)
+	var pad := 8.0
+	var gap := 8.0
+	var y := HOME_Y0 + 4.0
+	var h := HOME_H - 8.0
+	var total: float = vp.x - 2.0 * pad - 3.0 * gap
+	var wf: float = total * 0.30
+	var wm: float = total * 0.21
+	var ww: float = total * 0.20
+	var wd: float = total - wf - wm - ww
+	var x := pad
+	var farm := Rect2(x, y, wf, h)
+	x += wf + gap
+	var mill := Rect2(x, y, wm, h)
+	x += wm + gap
+	var well := Rect2(x, y, ww, h)
+	x += ww + gap
+	var depo := Rect2(x, y, wd, h)
+	return {"farm": farm, "mill": mill, "well": well, "depo": depo}
 
-func _sat_btn_rect() -> Rect2:
+func _erase_btn_rect() -> Rect2:
 	var vp := get_viewport_rect().size
-	return Rect2(vp.x - 182.0, 8.0, 84.0, 34.0)
-
-func _su_btn_rect() -> Rect2:
-	var vp := get_viewport_rect().size
-	return Rect2(vp.x - 272.0, 8.0, 84.0, 34.0)
+	return Rect2(vp.x - 8.0 - ERASE_W, vp.y - 90.0, ERASE_W, 34.0)
 
 func _seed_rects() -> Array:
+	# Bottom bar, upper row. Reserve the right edge for the erase toggle.
 	var vp := get_viewport_rect().size
 	var m := 8.0
 	var n := CROPS.size()
-	var w := (vp.x - float(n + 1) * m) / float(n)
+	var usable: float = vp.x - 2.0 * m - (ERASE_W + 6.0)
+	var w: float = (usable - float(n - 1) * m) / float(n)
+	var y := vp.y - 90.0
 	var out: Array = []
 	for k in range(n):
-		out.append(Rect2(m + float(k) * (w + m), 50.0, w, 34.0))
+		out.append(Rect2(m + float(k) * (w + m), y, w, 34.0))
 	return out
 
 func _tool_rects() -> Array:
+	# Bottom bar, lower row.
+	var vp := get_viewport_rect().size
 	var out: Array = []
 	var x := 10.0
-	var y := 92.0
+	var y := vp.y - 46.0
 	var w := 50.0
 	var h := 38.0
 	var m := 6.0
@@ -890,14 +927,27 @@ func _press(pos: Vector2) -> void:
 		_press_store(pos)
 		return
 
-	if _shop_btn_rect().has_point(pos):
+	# Homestead structures (top): tap to interact directly.
+	var hr := _home_rects()
+	if (hr["farm"] as Rect2).has_point(pos):
 		store_open = true
+		store_tab = 0
 		return
-	if _sat_btn_rect().has_point(pos):
+	if (hr["mill"] as Rect2).has_point(pos):
+		store_open = true
+		store_tab = 2
+		return
+	if (hr["well"] as Rect2).has_point(pos):
+		_buy_water()
+		_add_ring((hr["well"] as Rect2).get_center(), C_WATER)
+		return
+	if (hr["depo"] as Rect2).has_point(pos):
 		_sell_all()
 		return
-	if _su_btn_rect().has_point(pos):
-		_buy_water()
+
+	# Erase toggle (only while a bot tool is selected)
+	if current_tool >= 0 and _erase_btn_rect().has_point(pos):
+		erase_mode = not erase_mode
 		return
 
 	var seeds := _seed_rects()
@@ -910,6 +960,7 @@ func _press(pos: Vector2) -> void:
 	for i in range(trs.size()):
 		if (trs[i] as Rect2).has_point(pos):
 			current_tool = i - 1
+			erase_mode = false
 			return
 
 	var idx := _tile_at(pos)
@@ -945,7 +996,10 @@ func _paint(pos: Vector2) -> void:
 	var idx := _tile_at(pos)
 	if idx == -1:
 		return
-	bots[current_tool].zone[idx] = true
+	if erase_mode:
+		bots[current_tool].zone.erase(idx)
+	else:
+		bots[current_tool].zone[idx] = true
 
 # ---- Drawing ----
 
@@ -966,6 +1020,8 @@ func _draw() -> void:
 	var vp := get_viewport_rect().size
 	draw_rect(Rect2(Vector2.ZERO, vp), C_BG, true)
 	var font := ThemeDB.fallback_font
+
+	_draw_homestead(font, vp)
 
 	for i in range(states.size()):
 		var c := i % COLS
@@ -1025,6 +1081,8 @@ func _draw() -> void:
 		_draw_ufo(vp)
 	if birds_active:
 		_draw_birds(vp)
+	if sell_boost_t > 0.0:
+		_draw_trader(vp)
 
 	_draw_hud(font, vp)
 
@@ -1035,30 +1093,28 @@ func _draw() -> void:
 		_draw_store()
 
 func _draw_hud(font: Font, vp: Vector2) -> void:
-	# Top buttons
-	var su := _su_btn_rect()
-	var su_on := coins >= WATER_BUNDLE_COST
-	draw_rect(su, C_WATER if su_on else C_WATER.lerp(C_BG, 0.5), true)
-	draw_rect(su, C_BOT_LINE, false, 2.0)
-	draw_string(font, su.position + Vector2(8, 23), "+Su %d" % WATER_BUNDLE, HORIZONTAL_ALIGNMENT_LEFT, -1, 16, C_BG)
-
-	var sat := _sat_btn_rect()
-	var sat_on := stock_total() > 0
-	draw_rect(sat, C_GROW_B if sat_on else C_GROW_B.lerp(C_BG, 0.55), true)
-	draw_rect(sat, C_BOT_LINE, false, 2.0)
-	draw_string(font, sat.position + Vector2(12, 24), "Sat", HORIZONTAL_ALIGNMENT_LEFT, -1, 18, C_BG)
-
-	var sb := _shop_btn_rect()
-	draw_rect(sb, C_BOT_LINE.lerp(C_BG, 0.1), true)
-	draw_rect(sb, C_SUN, false, 2.0)
-	draw_string(font, sb.position + Vector2(8, 24), "Magaza", HORIZONTAL_ALIGNMENT_LEFT, -1, 17, C_BG)
-
-	# Status lines
-	draw_string(font, Vector2(12, 24), "Para %d   Su %d/%d" % [coins, water, WATER_MAX], HORIZONTAL_ALIGNMENT_LEFT, -1, 21, C_SOIL)
-	var line2 := "Depo %d/%d   Un %d" % [stock_total(), storage_cap, flour]
+	# Slim top status bar
+	var status := "Para %d   Su %d/%d   Depo %d/%d   Un %d" % [coins, water, WATER_MAX, stock_total(), storage_cap, flour]
 	if sell_boost_t > 0.0:
-		line2 += "   x1.5!"
-	draw_string(font, Vector2(12, 44), line2, HORIZONTAL_ALIGNMENT_LEFT, -1, 18, C_BOT_LINE)
+		status += "   x1.5!"
+	draw_string(font, Vector2(12, 28), status, HORIZONTAL_ALIGNMENT_LEFT, vp.x - 20.0, 19, C_SOIL)
+
+	# Bottom control bar background
+	var bar := Rect2(0.0, vp.y - BOTTOM_BAR_H, vp.x, BOTTOM_BAR_H)
+	draw_rect(bar, C_PANEL, true)
+	draw_rect(Rect2(bar.position, Vector2(bar.size.x, 2.0)), C_BOT_LINE, true)
+
+	# Erase / paint toggle (right edge of the seed row)
+	var eb := _erase_btn_rect()
+	if current_tool >= 0:
+		var ecol: Color = C_RED if erase_mode else C_GROW_B
+		draw_rect(eb, ecol, true)
+		draw_rect(eb, C_BOT_LINE, false, 2.0)
+		draw_string(font, eb.position + Vector2(10, 23), "Sil" if erase_mode else "Boya", HORIZONTAL_ALIGNMENT_LEFT, -1, 17, C_BG)
+	else:
+		draw_rect(eb, C_PANEL.lerp(C_BG, 0.5), true)
+		draw_rect(eb, C_BOT_LINE.lerp(C_BG, 0.4), false, 1.0)
+		draw_string(font, eb.position + Vector2(8, 22), "Bolge", HORIZONTAL_ALIGNMENT_LEFT, -1, 14, C_BOT_LINE.lerp(C_BG, 0.3))
 
 	# Seed selector
 	var seeds := _seed_rects()
@@ -1089,14 +1145,16 @@ func _draw_hud(font: Font, vp: Vector2) -> void:
 		draw_rect(tr, C_SUN if bsel else C_BOT_LINE, false, 2.0 if bsel else 1.0)
 		draw_string(font, tr.position + Vector2(18, 26), TASK_LETTER[bot.task], HORIZONTAL_ALIGNMENT_LEFT, -1, 20, C_BG if bsel else C_TILLED)
 
-	# Hint
+	# Hint (in the gap between the field and the bottom bar)
 	var hint := ""
 	if current_tool == -1:
-		hint = "El: tas->temizle, sur>ek>sula. Hasat depoya gider - 'Sat' ile paraya cevir."
+		hint = "El ile calis. Cifligi tikla=Magaza, Kuyu=su, Depo=sat."
+	elif erase_mode:
+		hint = "%s: SILME modu - dokundugun kareyi bolgeden cikarir" % TASK_NAME[current_tool]
 	else:
-		hint = "%s botu secili - parmakla bolgesini boya" % TASK_NAME[current_tool]
-	var hy: float = min(origin.y + rows * tile + 24.0, vp.y - 16.0)
-	draw_string(font, Vector2(14, hy), hint, HORIZONTAL_ALIGNMENT_LEFT, vp.x - 20.0, 16, C_BOT_LINE)
+		hint = "%s botu secili - parmakla bolgesini boya ('Sil' ile sil)" % TASK_NAME[current_tool]
+	var hy: float = min(origin.y + rows * tile + 22.0, vp.y - BOTTOM_BAR_H - 10.0)
+	draw_string(font, Vector2(14, hy), hint, HORIZONTAL_ALIGNMENT_LEFT, vp.x - 20.0, 15, C_BOT_LINE)
 
 func _draw_event(font: Font, vp: Vector2) -> void:
 	var a: float = clamp(event_flash / 2.8, 0.0, 1.0)
@@ -1119,7 +1177,7 @@ func _draw_rain(vp: Vector2) -> void:
 	var fade_in: float = clamp(rain_t / (RAIN_DUR - 0.5), 0.0, 1.0)
 	var fade_out: float = clamp(rain_t / 1.0, 0.0, 1.0)
 	var a: float = min(fade_in, fade_out)
-	var field := Rect2(0.0, origin.y, COLS * tile, field_h)
+	var field := Rect2(origin.x, origin.y, COLS * tile, field_h)
 	# wet soil: cool translucent overlay darkens/saturates the ground
 	draw_rect(field, Color(0.20, 0.32, 0.45, 0.22 * a), true)
 	# falling drops (deterministic, animated by clock)
@@ -1132,7 +1190,7 @@ func _draw_rain(vp: Vector2) -> void:
 		draw_line(Vector2(x, y), Vector2(x - 5.0, y + 16.0), drop_col, 2.0)
 	# splash ripples along a moving baseline near the ground
 	for k in range(10):
-		var sx: float = fmod(float(k) * 137.0 + clock * 40.0, COLS * tile)
+		var sx: float = origin.x + fmod(float(k) * 137.0 + clock * 40.0, COLS * tile)
 		var sy: float = origin.y + field_h - 6.0
 		draw_arc(Vector2(sx, sy), 4.0 + 2.0 * sin(clock * 6.0 + float(k)), 0.0, PI, 8, Color(0.8, 0.9, 1.0, 0.4 * a), 1.5)
 
@@ -1196,7 +1254,7 @@ func _draw_birds(vp: Vector2) -> void:
 
 func _draw_scarecrow(vp: Vector2) -> void:
 	var field_h := rows * tile
-	var base := Vector2(tile * 0.55, origin.y + field_h - 4.0)
+	var base := Vector2(origin.x + tile * 0.55, origin.y + field_h - 4.0)
 	var top := base + Vector2(0.0, -tile * 0.95)
 	var wood := Color("#6B4A2A")
 	# post + arms
@@ -1209,6 +1267,146 @@ func _draw_scarecrow(vp: Vector2) -> void:
 	# charge count
 	var font := ThemeDB.fallback_font
 	draw_string(font, base + Vector2(-12.0, 13.0), "x%d" % scarecrow_charges, HORIZONTAL_ALIGNMENT_LEFT, -1, 14, Color(1, 1, 1, 0.9))
+
+func _hlabel(font: Font, r: Rect2, text: String, col: Color) -> void:
+	var w: float = font.get_string_size(text, HORIZONTAL_ALIGNMENT_LEFT, -1, 13).x
+	draw_string(font, Vector2(r.position.x + (r.size.x - w) * 0.5, r.position.y + r.size.y - 2.0), text, HORIZONTAL_ALIGNMENT_LEFT, -1, 13, col)
+
+func _draw_homestead(font: Font, vp: Vector2) -> void:
+	# Soft band behind the buildings to separate them from the field.
+	draw_rect(Rect2(0.0, HOME_Y0, vp.x, HOME_H), C_BG.darkened(0.05), true)
+	draw_rect(Rect2(0.0, HOME_Y0 + HOME_H, vp.x, 2.0), C_BOT_LINE.lerp(C_BG, 0.4), true)
+	var hr := _home_rects()
+	_draw_farmhouse(font, hr["farm"] as Rect2)
+	_draw_windmill(font, hr["mill"] as Rect2)
+	_draw_well(font, hr["well"] as Rect2)
+	_draw_depot(font, hr["depo"] as Rect2)
+
+func _draw_farmhouse(font: Font, r: Rect2) -> void:
+	var ir := Rect2(r.position, Vector2(r.size.x, r.size.y - 15.0))
+	var wall := Color("#E8C39E")
+	var roof := Color("#B5532E")
+	var bw: float = ir.size.x * 0.78
+	var bh: float = ir.size.y * 0.50
+	var bx: float = ir.position.x + (ir.size.x - bw) * 0.5
+	var by: float = ir.position.y + ir.size.y - bh
+	draw_rect(Rect2(bx, by, bw, bh), wall, true)
+	var apex := Vector2(ir.position.x + ir.size.x * 0.5, ir.position.y + ir.size.y * 0.10)
+	draw_colored_polygon(PackedVector2Array([apex, Vector2(bx - 6.0, by), Vector2(bx + bw + 6.0, by)]), roof)
+	var dw: float = bw * 0.26
+	draw_rect(Rect2(ir.position.x + ir.size.x * 0.5 - dw * 0.5, by + bh * 0.45, dw, bh * 0.55), roof.darkened(0.15), true)
+	draw_rect(Rect2(bx + bw * 0.12, by + bh * 0.16, bw * 0.22, bh * 0.26), C_WATER.lerp(C_BG, 0.15), true)
+	_hlabel(font, r, "Ciftlik", C_SOIL)
+
+func _draw_windmill(font: Font, r: Rect2) -> void:
+	var ir := Rect2(r.position, Vector2(r.size.x, r.size.y - 15.0))
+	var built: bool = windmill_level > 0
+	var cx: float = ir.position.x + ir.size.x * 0.5
+	var ty: float = ir.position.y + ir.size.y * 0.34
+	var by: float = ir.position.y + ir.size.y
+	var tw_top: float = ir.size.x * 0.28
+	var tw_bot: float = ir.size.x * 0.52
+	var tcol: Color = Color("#C9A86A") if built else Color("#C9A86A").lerp(C_BG, 0.55)
+	draw_colored_polygon(PackedVector2Array([
+		Vector2(cx - tw_top * 0.5, ty),
+		Vector2(cx + tw_top * 0.5, ty),
+		Vector2(cx + tw_bot * 0.5, by),
+		Vector2(cx - tw_bot * 0.5, by),
+	]), tcol)
+	var hub := Vector2(cx, ty)
+	var ang: float = clock * 1.6 if built else 0.0
+	var bl: float = ir.size.x * 0.40
+	var bcol: Color = Color("#8A5A2B") if built else tcol.darkened(0.08)
+	var sailcol: Color = Color("#F2E6BE") if built else tcol.lightened(0.05)
+	for b in range(4):
+		var a: float = ang + float(b) * (PI / 2.0)
+		var dir := Vector2(cos(a), sin(a))
+		var tip := hub + dir * bl
+		draw_line(hub, tip, bcol, 4.0)
+		var root := hub + dir * (bl * 0.30)
+		var perp := Vector2(-sin(a), cos(a)) * (bl * 0.16)
+		draw_colored_polygon(PackedVector2Array([root, tip, tip + perp]), sailcol)
+	draw_circle(hub, 3.0, C_SOIL)
+	if built:
+		draw_string(font, Vector2(r.position.x + 2.0, ir.position.y + 12.0), "Un %d" % flour, HORIZONTAL_ALIGNMENT_LEFT, -1, 12, C_SOIL)
+	_hlabel(font, r, "Degirmen" if built else "Degirmen?", C_SOIL if built else C_BOT_LINE.lerp(C_BG, 0.2))
+
+func _draw_well(font: Font, r: Rect2) -> void:
+	var ir := Rect2(r.position, Vector2(r.size.x, r.size.y - 15.0))
+	var cx: float = ir.position.x + ir.size.x * 0.5
+	var base_y: float = ir.position.y + ir.size.y
+	var body_w: float = ir.size.x * 0.62
+	var body_top: float = base_y - ir.size.y * 0.42
+	draw_rect(Rect2(cx - body_w * 0.5, body_top, body_w, base_y - body_top), C_ROCK, true)
+	draw_rect(Rect2(cx - body_w * 0.5, body_top, body_w, base_y - body_top), C_ROCK.darkened(0.25), false, 2.0)
+	draw_rect(Rect2(cx - body_w * 0.4, body_top + 4.0, body_w * 0.8, 6.0), C_WATER, true)
+	var post_h: float = ir.size.y * 0.40
+	draw_line(Vector2(cx - body_w * 0.45, body_top), Vector2(cx - body_w * 0.45, body_top - post_h), C_SOIL, 3.0)
+	draw_line(Vector2(cx + body_w * 0.45, body_top), Vector2(cx + body_w * 0.45, body_top - post_h), C_SOIL, 3.0)
+	var roof_y: float = body_top - post_h
+	draw_colored_polygon(PackedVector2Array([
+		Vector2(cx, roof_y - 10.0),
+		Vector2(cx - body_w * 0.6, roof_y + 4.0),
+		Vector2(cx + body_w * 0.6, roof_y + 4.0),
+	]), Color("#B5532E"))
+	_hlabel(font, r, "Kuyu +Su", C_WATER.darkened(0.35))
+
+func _draw_depot(font: Font, r: Rect2) -> void:
+	var ir := Rect2(r.position, Vector2(r.size.x, r.size.y - 15.0))
+	var bw: float = ir.size.x * 0.72
+	var bx: float = ir.position.x + (ir.size.x - bw) * 0.5
+	var bh: float = ir.size.y * 0.52
+	var by: float = ir.position.y + ir.size.y - bh
+	draw_rect(Rect2(bx, by, bw, bh), Color("#C2693F"), true)
+	draw_colored_polygon(PackedVector2Array([
+		Vector2(ir.position.x + ir.size.x * 0.5, by - ir.size.y * 0.22),
+		Vector2(bx - 4.0, by),
+		Vector2(bx + bw + 4.0, by),
+	]), Color("#8A4A2B"))
+	# fill gauge (stock / capacity)
+	var frac: float = clamp(float(stock_total()) / float(max(storage_cap, 1)), 0.0, 1.0)
+	var gx: float = bx + 5.0
+	var gw: float = bw - 10.0
+	var gh: float = bh - 12.0
+	var gy: float = by + 6.0
+	draw_rect(Rect2(gx, gy, gw, gh), C_BG.darkened(0.04), true)
+	draw_rect(Rect2(gx, gy + gh * (1.0 - frac), gw, gh * frac), C_GROW_B, true)
+	draw_string(font, Vector2(gx, gy + gh * 0.5 + 5.0), "%d/%d" % [stock_total(), storage_cap], HORIZONTAL_ALIGNMENT_LEFT, gw, 12, C_SOIL)
+	_hlabel(font, r, "Depo Sat", C_SOIL)
+
+func _trader_x(vp: Vector2) -> float:
+	var standx: float = vp.x * 0.5
+	if sell_boost_t > SELL_BOOST_DUR - 2.0:
+		var f: float = clamp((SELL_BOOST_DUR - sell_boost_t) / 2.0, 0.0, 1.0)
+		return lerp(-60.0, standx, f)
+	elif sell_boost_t > 2.0:
+		return standx
+	var fo: float = clamp((2.0 - sell_boost_t) / 2.0, 0.0, 1.0)
+	return lerp(standx, vp.x + 60.0, fo)
+
+func _draw_trader(vp: Vector2) -> void:
+	var x: float = _trader_x(vp)
+	var y: float = origin.y + tile * 0.55 + sin(clock * 9.0) * 2.0
+	var s: float = tile * 0.5
+	draw_circle(Vector2(x, y + s * 0.5), s * 0.35, Color(0, 0, 0, 0.12))
+	draw_circle(Vector2(x - s * 0.28, y + s * 0.45), s * 0.16, C_SOIL)
+	draw_circle(Vector2(x + s * 0.28, y + s * 0.45), s * 0.16, C_SOIL)
+	draw_circle(Vector2(x - s * 0.28, y + s * 0.45), s * 0.06, C_BG)
+	draw_circle(Vector2(x + s * 0.28, y + s * 0.45), s * 0.06, C_BG)
+	draw_rect(Rect2(x - s * 0.45, y - s * 0.1, s * 0.9, s * 0.5), Color("#B5793F"), true)
+	draw_rect(Rect2(x - s * 0.45, y - s * 0.1, s * 0.9, s * 0.5), C_SOIL, false, 2.0)
+	draw_circle(Vector2(x - s * 0.15, y - s * 0.1), s * 0.14, C_GROW_B)
+	draw_circle(Vector2(x + s * 0.18, y - s * 0.12), s * 0.13, C_GOLD)
+	var mx: float = x + s * 0.55
+	draw_circle(Vector2(mx, y - s * 0.25), s * 0.14, Color("#E8C39E"))
+	draw_colored_polygon(PackedVector2Array([
+		Vector2(mx, y - s * 0.18),
+		Vector2(mx - s * 0.18, y + s * 0.35),
+		Vector2(mx + s * 0.18, y + s * 0.35),
+	]), Color("#5A6FA0"))
+	var cy: float = y - s * 0.75 + sin(clock * 4.0) * 2.0
+	draw_circle(Vector2(x, cy), s * 0.13, C_GOLD)
+	draw_string(ThemeDB.fallback_font, Vector2(x - s * 0.05, cy + s * 0.09), "$", HORIZONTAL_ALIGNMENT_LEFT, -1, int(s * 0.32), C_SOIL)
 
 func _store_row(r: Rect2, accent: Color, letter: String, title: String, desc: String, cost_text: String, on: bool) -> void:
 	var font := ThemeDB.fallback_font
