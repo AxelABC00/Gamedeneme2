@@ -1,0 +1,16 @@
+; PROTOTYPE - NOT FOR PRODUCTION
+; Question: Does the low-poly 3D look (lighting/camera/cozy feel) match what we want?
+; Date: 2026-06-29
+config_version=5
+
+[application]
+config/name="HarvestCo Low-Poly Look Test"
+run/main_scene="res://main.tscn"
+config/features=PackedStringArray("4.3", "Forward Plus")
+
+[display]
+window/size/viewport_width=540
+window/size/viewport_height=960
+
+[rendering]
+renderer/rendering_method="forward_plus"

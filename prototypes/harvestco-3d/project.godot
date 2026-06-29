@@ -1,0 +1,13 @@
+; PROTOTYPE — production-candidate seed for the 2D→3D migration
+; Phase A+B: 3D scaffold + logic port (sim.gd) rendered as 3D tiles
+; Date: 2026-06-29
+config_version=5
+
+[application]
+config/name="HarvestCo 3D (migration)"
+run/main_scene="res://world.tscn"
+config/features=PackedStringArray("4.3", "Forward Plus")
+
+[display]
+window/size/viewport_width=540
+window/size/viewport_height=960
