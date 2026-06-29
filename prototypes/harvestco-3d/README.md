@@ -63,7 +63,89 @@ Done in two steps (logic first, then input):
   round-trips correctly (corner/neighbour/front tiles), and a programmatic harvest
   resets the front tile to empty soil in `_shot_3d.png`.
 
-## Next: Phase F (HUD) or Phase D (bots)
-A real play session is currently capped by starting coins/water with no way to sell or
-buy — so the **HUD** (coins/water readout, Sat/buy-water, seed picker) is the natural
-next step, then bots (Phase D). See [`design/3d-migration-plan.md`](../../design/3d-migration-plan.md).
+## Phase F CONCLUDED ✓ — real Control-node HUD
+The loop is now self-sustaining: the `_draw`-era debt is paid off with real Control nodes.
+- **`hud.gd`** (CanvasLayer, code-built Controls; becomes `hud.tscn` at production) —
+  top bar reads coins / water / depo (x/cap); bottom holds a per-crop **seed picker**
+  (one Button each, modulated by the crop color, selected one prefixed `>`), **Sat**
+  (`sell_all`), and **Su Al** (`buy_water`). Emits `sell_pressed` / `buy_water_pressed`
+  / `seed_selected(idx)`; `world.gd` runs the sim funcs, then `hud.refresh(sim)` + a
+  fading center `toast`. `refresh` is also called after every tap so readouts stay live.
+- Mobile: explicit top/bottom anchors + safe-area margins + large (50–62px) tap targets.
+  Center stays clear so field taps fall through; toast is `MOUSE_FILTER_IGNORE`.
+- Verified `HUD_TEST=1 VERIFY_SHOT=1` — signal→handler→sim wiring all PASS (Sat +24 coins,
+  Su Al water +25/coins −4, seed pick updates `selected_seed`); `_shot_3d.png` shows the
+  full HUD laid out correctly over the field.
+
+## Phase F2 CONCLUDED ✓ — store page + homestead buildings (2D parity, part 1)
+Closes the biggest parity gap from the 2D build: the full economy and a real store.
+- **Economy/upgrade/building logic ported into `sim.gd`** (near-verbatim from 2D): all
+  upgrade levels (yield/speed/dura/well/windmill/depo), passive buildings (well makes
+  water, windmill grinds wheat→flour in `tick`), `sell_mult`/`yield_mult`/`bot_speed`/
+  `wear_rate`, every cost formula, `buy_*` funcs, field expansion, bot data+cost (`buy_bot`
+  returns a `Bot`; AI movement is Phase D), and the store item model
+  (`tab_items`/`item_info`/`item_cost`/`item_enabled`/`buy_item`). Verified by
+  `test_sim.gd` → **52/52 deterministic checks pass**.
+- **`store.gd`** (CanvasLayer overlay, code-built) — a real 3-tab store page
+  (**Botlar / Yukseltmeler / Binalar**), scrollable rows with accent swatch + title +
+  desc + live cost button (disabled when unaffordable/unavailable). Emits
+  `buy_requested(id)`; `world.gd` runs `sim.buy_item`, refreshes, and **closes on bot
+  purchase** so the player can place it (Phase D). Opened by the HUD **Magaza** button.
+- **Homestead buildings next to the farmhouse** (`world.gd`) — procedural windmill, well,
+  and depot in a band beside the farmhouse, each a tappable `StaticBody3D`
+  (physics-raycast in `_tap`): **well = Su Al, depot = Sat, farmhouse = Magaza,
+  windmill = Magaza→Binalar**. Field expansion rebuilds the plot live.
+- Verified `STORE_TEST=1` (open → buy upgrade keeps store open → buy bot closes store,
+  all PASS) and screenshots of the homestead band + all three store tabs.
+
+## Phase D CONCLUDED ✓ — bot AI + nice robots + zone painting (2D parity, part 2)
+The **automation core** — "automate your labor" — is now live in 3D.
+- **Bot AI ported into `sim.gd`, render-independent** — each `Bot` carries a grid-space
+  `gpos: Vector2` (col,row floats), so movement/targeting/work-timing all happen in the
+  sim and the view just reads it. `tick_bots(delta)`: condition decay, `_pick_target`
+  (TILL/CLEAN bots spread to untouched tiles, others go nearest), a `claimed[]` array so
+  no two bots fight over a tile, move→work state machine in grid space, `_apply_task`
+  (TILL/PLANT/WATER/HARVEST/GOLD_HUNT/CLEAN), `_can_do` gating (WATER needs water, PLANT
+  needs coins), plus a soft push-apart so idle bots don't stack. Verified by `test_sim.gd`
+  → **61/61 deterministic checks pass** (tests 21–26 cover buy→paint→work, claim
+  exclusion, idle-without-water, condition decay, harvest+bank, long-range travel).
+- **Nice procedural robot (`world.gd: _make_bot`)** — a cute low-poly farmbot: dark
+  tracked base + 4 wheels, cream chassis, **task-colour glowing belly panel**, head with
+  a dark visor and two glowing task-colour eyes, an antenna topped with a glowing bulb,
+  and two little arms. Colour-coded per specialist (matches the store/tool swatches), so
+  you read a bot's job at a glance. `_sync_bots` smooth-follows `_grid_to_world(gpos)`,
+  faces travel direction (`atan2`+`lerp_angle`), and bobs while working.
+- **Zone painting** — a HUD **tool row** (`El` hand + one colour chip per owned bot + a
+  `Sil` erase toggle); selecting a bot shows its zone as glowing tinted tiles and
+  tap/drag paints (or erases) that bot's work area. Buying a bot auto-selects it.
+  Reuses `_tile_under` for tap+drag (`InputEventScreenDrag` / mouse-motion).
+- Verified `BOT_TEST=1` (buy→paint→tick→tile worked + view node spawned, all PASS) and
+  `BOT_SHOW=1 VERIFY_SHOT=1` — `_shot_3d.png` shows specialist bots out on the field
+  tilling/harvesting/cleaning with their painted zones.
+
+## Phase H CONCLUDED ✓ — random events (2D parity, part 3)
+The last 2D parity gap is closed: the field now has weather and visitors.
+- **Event logic ported into `sim.gd`, render-independent** — `tick_events(delta)` runs an
+  `event_timer` (45–80s) that fires `_trigger_event()` from a weighted pool (rain ×2,
+  trader ×3, UFO ×1, birds ×3 only when there's ripe to eat). Each event is pure state:
+  `rain_t` (refills water), `ufo_active/ufo_t/ufo_target` (a 3×3 `_ufo_circle_at` crop-circle
+  fired once at mid-flight — growing→golden-ripe, ripe→golden), `birds_active/birds_t`
+  (`_birds_eat` removes up to 3 ripe, **repelled by a scarecrow charge**), `sell_boost_t`
+  (trader x1.5 for 18s). A message contract (`event_msg` + `event_seq`) lets the view toast
+  without the sim knowing about UI. Verified by `test_sim.gd` → **70/70 deterministic checks**
+  (tests 27–32: rain refill, UFO ring + outside-untouched, birds eat-3, scarecrow block,
+  timer fires, UFO mid-flight fire + end deactivate).
+- **3D event visuals (`world.gd: _sync_events` + builders)** — a glowing green **flying saucer**
+  with under-belly lights and an abduction beam that flies across and drops a golden crop-circle;
+  **blue rain streaks** (GPUParticles, preprocessed) over the whole plot; a **dark bird flock**
+  that swoops in and dips at the crops; a **striped trader cart** parked in front during the sell
+  boost; and a **scarecrow** that stands in the field while charges remain. Each is created lazily
+  and shown/hidden purely from sim state; new-event messages toast via the HUD.
+- Verified `EVENT_TEST=1` (every event spawns/updates its node, toast syncs to `event_seq`,
+  all hide when state clears — all PASS) and `EVENT_SHOW=<rain|ufo|birds|trader|scarecrow>`
+  screenshots showing each spectacle on the field.
+
+## Status: full 2D→3D parity reached ✓
+Store + buildings (F2), bots (D), and events (H) are all live in 3D. The logic/view split
+held across every phase — game logic ported near-verbatim into `sim.gd`; only presentation
+and input were rewritten. See [`design/3d-migration-plan.md`](../../design/3d-migration-plan.md).
