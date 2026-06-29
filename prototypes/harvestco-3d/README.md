@@ -149,3 +149,38 @@ The last 2D parity gap is closed: the field now has weather and visitors.
 Store + buildings (F2), bots (D), and events (H) are all live in 3D. The logic/view split
 held across every phase — game logic ported near-verbatim into `sim.gd`; only presentation
 and input were rewritten. See [`design/3d-migration-plan.md`](../../design/3d-migration-plan.md).
+
+## Polish pass — audio, shadows, and the production shell ✓
+With parity reached, this pass hardens the build toward "feels like a real game" (still a
+prototype — see standards note below).
+- **Crisper shadows** (`world.gd: _build_environment`) — the blocky directional shadows are
+  fixed: `directional_shadow_max_distance` tightened to 38 m (the unset 100 m default was
+  spreading the atlas thin), 2 PSSM splits + blend, a 4096 atlas, and `shadow_normal_bias` /
+  `shadow_blur` tuned to kill acne without peter-panning. SSAO softened to match.
+- **Audio buses + settings** (`settings.gd`, new) — a `Music` and an `SFX` bus are created at
+  startup (before `music.gd`/`sfx.gd` are added, so they can route to them). The player's
+  mute/volume choices persist to `user://settings.json`. `music.gd` and `sfx.gd` now route to
+  those buses (Master fallback).
+- **Save / Load** (`save.gd` + `SimState.to_dict/from_dict/new_game`) — the whole game
+  (field, economy, upgrades, buildings, **bots** incl. their painted zones) serializes to
+  `user://save.json`. Autosaves every 20 s, on pause, and on focus-out / close. Round-trip
+  verified lossless (`_savetest` harness, since removed). Bots' 3D nodes auto-respawn from the
+  loaded sim via the existing lazy `_sync_bots`.
+- **Main menu / pause / settings** (`menu.gd`, new — a `CanvasLayer` shell) — `world.gd` now
+  boots to a **main menu** (Yeni Oyun / Devam Et / Ayarlar) instead of straight into the demo.
+  An in-game **pause button** raises a Resume / Ayarlar / Ana Menü overlay; `_process` and
+  input freeze while paused. New Game starts a fresh farm (rocks to clear); Continue loads the
+  save. The VERIFY_SHOT test harness still boots the rich demo directly.
+- **Onboarding** (`tutorial.gd`, new) — first-ever new game shows a 5-step coach card carousel
+  (çapala → ek+sula → hasat → temizle+büyüt → robot al), anchored low for one-thumb reach.
+  A `user://tutorial_seen` marker shows it only once.
+
+> All new files are loaded **by path** (`load("res://x.gd")`) with untyped vars and duck-typed
+> calls — never by `class_name` — because new scripts aren't in the global class cache during
+> console/headless runs that skip the editor import (the same gotcha that first broke
+> `CozyMusic`). Test hooks: `MENU_SHOT=1` / `PLAY_SHOT=1` (windowed binary, no `--headless`)
+> screenshot the menu / in-game shell.
+
+> **Prototype standards apply** (`.claude/rules/prototype-code.md`): this is a
+> production-*candidate* seed, not production code. If/when it graduates, the shell is rewritten
+> to production standards (scene files, DI, tests) — it is not migrated verbatim.

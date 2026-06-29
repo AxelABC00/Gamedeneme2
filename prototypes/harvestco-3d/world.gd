@@ -44,6 +44,14 @@ var _critters: Array = []            # [{node, center, phase, speed, radius}] wa
 var _smoke: Array = []               # [{node, mat, phase}] chimney smoke puffs
 var _smoke_base: Vector3 = Vector3.ZERO  # local origin of the chimney smoke column
 var _sfx: Node                       # procedural action sounds (till/plant/water/harvest)
+# production shell — all loaded by path (no class_name refs) so console runs still parse
+var _settings: Node                  # GameSettings: audio buses + persisted prefs
+var _save: RefCounted                # SaveGame: file IO for user://save.json
+var _menu: Node                      # main menu / pause / settings overlay (CanvasLayer)
+var _tutorial: Node                  # first-run onboarding hints (CanvasLayer)
+var _started: bool = false           # gameplay world has been built
+var _paused: bool = false            # pause overlay is up; world frozen
+var _autosave_t: float = 0.0         # accumulates to periodic autosave
 const PICK_Y := 0.10                 # soil surface height for tap raycast
 const BOT_SCALE := 1.45              # robots read clearly at the pulled-back camera
 const B_FARM := "farm"
@@ -52,10 +60,53 @@ const B_DEPOT := "depot"
 const B_MILL := "mill"
 
 func _ready() -> void:
-	sim = SimState.new()
-	sim.setup_demo()
+	# audio buses must exist before music/sfx are added (settings._ready creates them)
+	_settings = (load("res://settings.gd") as GDScript).new()
+	add_child(_settings)
+	_save = (load("res://save.gd") as GDScript).new()
 
+	# sky + sun + camera are always present (they sit behind the menu too)
 	_build_environment()
+
+	# Test / screenshot harness: build the rich demo world immediately and run hooks.
+	if OS.has_environment("VERIFY_SHOT"):
+		_start_game("demo")
+		_shoot()
+		return
+
+	# Normal play: show the main menu first. Its buttons call into _start_game().
+	get_tree().paused = false
+	_menu = (load("res://menu.gd") as GDScript).new()
+	add_child(_menu)
+	_menu.setup(self, _settings)
+	_menu.show_main(_save.has_save())
+
+	# test hook: screenshot the main menu, then quit (windowed binary, no --headless)
+	if OS.has_environment("MENU_SHOT"):
+		await get_tree().create_timer(1.0).timeout
+		var img := get_viewport().get_texture().get_image()
+		img.save_png("res://_menu_shot.png")
+		get_tree().quit()
+	# test hook: start a fresh game and screenshot the in-game shell (farm + pause + tutorial)
+	if OS.has_environment("PLAY_SHOT"):
+		_menu._on_new_game()   # exercise the real menu path (hides overlay, shows pause btn)
+		await get_tree().create_timer(1.5).timeout
+		var img2 := get_viewport().get_texture().get_image()
+		img2.save_png("res://_play_shot.png")
+		get_tree().quit()
+
+# Build the playable world. mode: "demo" (tests), "new" (fresh farm), "load" (from save).
+func _start_game(mode: String) -> void:
+	sim = SimState.new()
+	match mode:
+		"demo":
+			sim.setup_demo()
+		"load":
+			sim.new_game()
+			_save.load_into(sim)
+		_:
+			sim.new_game()
+
 	_build_ground()
 	_build_soil_tiles()
 	_build_props()
@@ -80,8 +131,54 @@ func _ready() -> void:
 	_sfx = (load("res://sfx.gd") as GDScript).new()
 	add_child(_sfx)
 
-	if OS.has_environment("VERIFY_SHOT"):
-		_shoot()
+	# loading a save? rebuild the shared work-zone overlay from the bots' restored zones
+	# (the bots' own 3D nodes are recreated lazily by _sync_bots on the first frame).
+	if mode == "load":
+		for b in sim.bots:
+			for k in b.zone:
+				_shared_zone[int(k)] = true
+		_update_zone_view()
+
+	_started = true
+	_paused = false
+
+# --- public API the menu/tutorial call into (all duck-typed, no class refs) ---
+func start_new_game() -> void:
+	_save.clear()
+	_start_game("new")
+	_maybe_start_tutorial(true)
+
+func continue_game() -> void:
+	_start_game("load")
+	_maybe_start_tutorial(false)
+
+func has_save() -> bool:
+	return _save != null and _save.has_save()
+
+# First-run coach hints. Shown once ever (flag persisted by tutorial.gd), new games only.
+func _maybe_start_tutorial(is_new: bool) -> void:
+	if not is_new:
+		return
+	if FileAccess.file_exists("user://tutorial_seen"):
+		return
+	_tutorial = (load("res://tutorial.gd") as GDScript).new()
+	add_child(_tutorial)
+	_tutorial.begin()
+
+func autosave() -> void:
+	if _started and sim != null and _save != null:
+		_save.save_sim(sim)
+
+func set_paused(p: bool) -> void:
+	_paused = p
+	if p:
+		autosave()
+
+# Persist when the app loses focus or is closing (mobile lifecycle + desktop close).
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_WM_CLOSE_REQUEST or what == NOTIFICATION_APPLICATION_FOCUS_OUT \
+			or what == NOTIFICATION_WM_GO_BACK_REQUEST:
+		autosave()
 
 # ---------------------------------------------------------------- HUD (Phase F)
 func _build_hud() -> void:
@@ -193,6 +290,12 @@ func _on_clear_zone() -> void:
 	_update_zone_view()
 
 func _process(delta: float) -> void:
+	if not _started or _paused or sim == null:
+		return
+	_autosave_t += delta
+	if _autosave_t >= 20.0:
+		_autosave_t = 0.0
+		autosave()
 	sim.tick(delta)
 	# Rebuild a tile when it changes. On a STATE change (till/plant/water/harvest —
 	# whether by the player OR a bot) refresh the whole tile so the SOIL COLOUR updates
@@ -218,6 +321,8 @@ func _process(delta: float) -> void:
 
 # ---------------------------------------------------------------- input (Phase C)
 func _unhandled_input(event: InputEvent) -> void:
+	if not _started or _paused:
+		return  # menu/pause overlay is up — let the UI handle input
 	if event is InputEventScreenTouch and event.pressed:
 		_tap(event.position)
 	elif event is InputEventScreenDrag:
@@ -1723,8 +1828,8 @@ func _build_environment() -> void:
 	env.ambient_light_source = Environment.AMBIENT_SOURCE_SKY
 	env.ambient_light_energy = 0.6
 	env.ssao_enabled = true
-	env.ssao_radius = 0.6
-	env.ssao_intensity = 2.2
+	env.ssao_radius = 0.5
+	env.ssao_intensity = 1.5
 	env.glow_enabled = true
 	env.glow_intensity = 0.25
 	env.tonemap_mode = Environment.TONE_MAPPER_ACES
@@ -1735,13 +1840,20 @@ func _build_environment() -> void:
 	we.environment = env
 	add_child(we)
 
+	# crisper shadows: the whole farm fits in ~38m, so keep ALL shadow resolution there
+	# instead of spreading it across the default 100m (that was the blocky-edge culprit).
+	RenderingServer.directional_shadow_atlas_set_size(4096, true)
 	var sun := DirectionalLight3D.new()
 	sun.light_color = Color(1.0, 0.94, 0.82)
 	sun.light_energy = 1.35
 	sun.shadow_enabled = true
-	sun.directional_shadow_mode = DirectionalLight3D.SHADOW_PARALLEL_4_SPLITS
+	# 2 splits (not 4) over a tight range = far more pixels per metre on the farm
+	sun.directional_shadow_mode = DirectionalLight3D.SHADOW_PARALLEL_2_SPLITS
 	sun.directional_shadow_blend_splits = true
-	sun.shadow_blur = 1.5
+	sun.directional_shadow_max_distance = 38.0
+	sun.shadow_blur = 0.9                 # soft but not mushy
+	sun.shadow_normal_bias = 1.3          # kill shadow acne without peter-panning
+	sun.shadow_bias = 0.04
 	sun.rotation_degrees = Vector3(-52, -42, 0)
 	add_child(sun)
 

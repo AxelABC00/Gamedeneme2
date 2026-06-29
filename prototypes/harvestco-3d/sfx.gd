@@ -18,9 +18,11 @@ var _streams: Dictionary = {}        # name -> AudioStreamWAV
 var _cooldown: Dictionary = {}       # name -> seconds remaining before it can replay
 
 func _ready() -> void:
+	# routed to the "SFX" bus (created by settings.gd) so the player can mute/adjust it
+	var bus_name := "SFX" if AudioServer.get_bus_index("SFX") != -1 else "Master"
 	for i in range(8):
 		var p := AudioStreamPlayer.new()
-		p.bus = "Master"
+		p.bus = bus_name
 		add_child(p)
 		_players.append(p)
 	_streams["till"] = _wav(_synth_till())

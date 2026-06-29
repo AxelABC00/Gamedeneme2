@@ -35,7 +35,8 @@ func _ready() -> void:
 	gen.buffer_length = 0.25
 	stream = gen
 	volume_db = -8.0
-	bus = "Master"
+	# routed to the "Music" bus (created by settings.gd) so the player can mute/adjust it
+	bus = "Music" if AudioServer.get_bus_index("Music") != -1 else "Master"
 	play()
 	_pb = get_stream_playback()
 	_fill()

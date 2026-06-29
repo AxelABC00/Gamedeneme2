@@ -194,6 +194,123 @@ func setup_demo() -> void:
 				grow[i] = 1.0
 				golden[i] = (c % 4 == 0)
 
+# A fresh farm for a brand-new player: empty plots with a scattering of rocks to clear.
+# Economy/upgrades stay at the constructor defaults (START_COINS, START_WATER, ...).
+func new_game() -> void:
+	rows = START_ROWS
+	var n := COLS * rows
+	states = PackedInt32Array(); states.resize(n)
+	grow = PackedFloat32Array(); grow.resize(n)
+	crop_type = PackedInt32Array(); crop_type.resize(n)
+	stock = PackedInt32Array(); stock.resize(CROPS.size())
+	claimed.clear(); claimed.resize(n)
+	golden.clear()
+	for i in range(n):
+		golden.append(false)
+		crop_type[i] = 0
+		grow[i] = 0.0
+		states[i] = OBSTACLE if randf() < OBSTACLE_CHANCE else EMPTY
+	event_timer = randf_range(EVENT_MIN, EVENT_MAX)
+
+# --- save / load (Phase: production hardening) ---
+# Serialize the whole mutable game state to a plain Dictionary (JSON-friendly).
+func to_dict() -> Dictionary:
+	var bot_list: Array = []
+	for b in bots:
+		var zone_keys: Array = []
+		for k in b.zone:
+			zone_keys.append(int(k))
+		bot_list.append({
+			"task": b.task, "seed": b.seed, "zone": zone_keys,
+			"target": b.target, "state": b.state, "work": b.work,
+			"age": b.age, "condition": b.condition,
+			"gx": b.gpos.x, "gy": b.gpos.y, "hx": b.home.x, "hy": b.home.y,
+		})
+	return {
+		"v": 1,
+		"rows": rows,
+		"states": _arr_i(states),
+		"grow": _arr_f(grow),
+		"crop_type": _arr_i(crop_type),
+		"golden": golden.duplicate(),
+		"coins": coins, "water": water,
+		"stock": _arr_i(stock), "flour": flour,
+		"harvested": harvested, "storage_cap": storage_cap,
+		"selected_seed": selected_seed,
+		"yield_level": yield_level, "speed_level": speed_level,
+		"dura_level": dura_level, "well_level": well_level,
+		"windmill_level": windmill_level, "depo_level": depo_level,
+		"scarecrow_charges": scarecrow_charges,
+		"event_timer": event_timer,
+		"bots": bot_list,
+	}
+
+# Restore state written by to_dict(). Transient event visuals always start cleared.
+func from_dict(d: Dictionary) -> void:
+	rows = int(d.get("rows", START_ROWS))
+	states = _pack_i(d.get("states", []))
+	grow = _pack_f(d.get("grow", []))
+	crop_type = _pack_i(d.get("crop_type", []))
+	golden = (d.get("golden", []) as Array).duplicate()
+	var n := states.size()
+	if grow.size() != n: grow.resize(n)
+	if crop_type.size() != n: crop_type.resize(n)
+	while golden.size() < n: golden.append(false)
+	claimed.clear(); claimed.resize(n)
+	coins = int(d.get("coins", START_COINS))
+	water = int(d.get("water", START_WATER))
+	stock = _pack_i(d.get("stock", []))
+	if stock.size() != CROPS.size(): stock.resize(CROPS.size())
+	flour = int(d.get("flour", 0))
+	harvested = int(d.get("harvested", 0))
+	storage_cap = int(d.get("storage_cap", START_STORAGE))
+	selected_seed = int(d.get("selected_seed", WHEAT))
+	yield_level = int(d.get("yield_level", 0))
+	speed_level = int(d.get("speed_level", 0))
+	dura_level = int(d.get("dura_level", 0))
+	well_level = int(d.get("well_level", 0))
+	windmill_level = int(d.get("windmill_level", 0))
+	depo_level = int(d.get("depo_level", 0))
+	scarecrow_charges = int(d.get("scarecrow_charges", 0))
+	event_timer = float(d.get("event_timer", randf_range(EVENT_MIN, EVENT_MAX)))
+	rain_t = 0.0; ufo_active = false; birds_active = false; sell_boost_t = 0.0
+	bots.clear()
+	for bd in (d.get("bots", []) as Array):
+		var b := Bot.new()
+		b.task = int(bd.get("task", 0))
+		b.seed = int(bd.get("seed", 0))
+		b.target = int(bd.get("target", -1))
+		b.state = String(bd.get("state", "moving"))
+		b.work = float(bd.get("work", 0.0))
+		b.age = float(bd.get("age", 0.0))
+		b.condition = float(bd.get("condition", 1.0))
+		b.gpos = Vector2(float(bd.get("gx", 0.0)), float(bd.get("gy", 0.0)))
+		b.home = Vector2(float(bd.get("hx", 0.0)), float(bd.get("hy", 0.0)))
+		b.zone = {}
+		for k in (bd.get("zone", []) as Array):
+			b.zone[int(k)] = true
+		bots.append(b)
+
+func _arr_i(p) -> Array:
+	var a: Array = []
+	for v in p: a.append(int(v))
+	return a
+
+func _arr_f(p) -> Array:
+	var a: Array = []
+	for v in p: a.append(float(v))
+	return a
+
+func _pack_i(a) -> PackedInt32Array:
+	var p := PackedInt32Array()
+	for v in (a as Array): p.append(int(v))
+	return p
+
+func _pack_f(a) -> PackedFloat32Array:
+	var p := PackedFloat32Array()
+	for v in (a as Array): p.append(float(v))
+	return p
+
 # Time-based growth (ported). Returns true if any tile changed stage (view refresh).
 func tick(delta: float) -> bool:
 	var changed := false
