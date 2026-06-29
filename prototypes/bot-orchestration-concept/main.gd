@@ -34,8 +34,13 @@ const MILL_RATE := 0.5      # wheat->flour per second per windmill level
 const WELL_RATE := 0.6      # water per second per well level
 
 # Random events
-const EVENT_MIN := 22.0
-const EVENT_MAX := 40.0
+const EVENT_MIN := 45.0
+const EVENT_MAX := 80.0
+const RAIN_DUR := 5.0
+const UFO_DUR := 5.5
+const BIRDS_DUR := 4.0
+const BIRD_COUNT := 6
+const SCARECROW_MAX := 5
 
 # Tile lifecycle
 const EMPTY := 0
@@ -74,6 +79,7 @@ const IT_WELL := 11
 const IT_EXPAND := 12
 const IT_WINDMILL := 13
 const IT_DEPO := 14
+const IT_SCARE := 15
 
 # Crops (index 3 = Bugday = WHEAT)
 const CROPS := [
@@ -151,6 +157,16 @@ var event_timer: float = 0.0
 var event_text: String = ""
 var event_flash: float = 0.0
 var sell_boost_t: float = 0.0
+var rain_t: float = 0.0
+var ufo_active: bool = false
+var ufo_t: float = 0.0
+var ufo_target: int = -1
+var ufo_fired: bool = false
+var birds_active: bool = false
+var birds_t: float = 0.0
+var birds_blocked: bool = false
+var birds_done: bool = false
+var scarecrow_charges: int = 0
 
 func _ready() -> void:
 	randomize()
@@ -265,6 +281,29 @@ func _process(delta: float) -> void:
 		sell_boost_t -= delta
 	if event_flash > 0.0:
 		event_flash -= delta
+	if rain_t > 0.0:
+		rain_t -= delta
+	if ufo_active:
+		ufo_t += delta
+		if not ufo_fired and ufo_target >= 0:
+			var tcx: float = _tile_center(ufo_target).x
+			if _ufo_x() >= tcx:
+				_ufo_circle_at(ufo_target)
+				ufo_fired = true
+		if ufo_t >= UFO_DUR:
+			ufo_active = false
+	if birds_active:
+		birds_t += delta
+		if not birds_done and birds_t >= BIRDS_DUR * 0.5:
+			birds_done = true
+			if birds_blocked:
+				event_text = "Korkuluk kuslari kacirdi!"
+			else:
+				var eaten := _birds_eat()
+				event_text = "Kuslar %d olgun urunu yedi!" % eaten
+			event_flash = 2.8
+		if birds_t >= BIRDS_DUR:
+			birds_active = false
 	event_timer -= delta
 	if event_timer <= 0.0:
 		_trigger_event()
@@ -430,22 +469,36 @@ func _sell_all() -> void:
 		_add_ring(Vector2(vp.x * 0.5, origin.y * 0.5), C_GROW_B)
 
 func _trigger_event() -> void:
-	var r := randi() % 4
-	if r == 3 and _count_state(RIPE) == 0:
-		r = 0
+	# Weighted pool: yagmur/UFO are rare spectacle, tuccar/kuslar are common.
+	# rain x2, trader x3, ufo x1; birds x3 only when there is ripe to eat.
+	var pool: Array[int] = [0, 0, 2, 2, 2, 1]
+	if _count_state(RIPE) > 0:
+		pool.append(3)
+		pool.append(3)
+		pool.append(3)
+	var r: int = pool[randi() % pool.size()]
 	match r:
 		0:
 			water = min(water + 25, WATER_MAX)
-			event_text = "Yagmur yagdi! Su deposu doldu."
+			rain_t = RAIN_DUR
+			event_text = "Yagmur yagiyor! Topraklar suluyor."
 		1:
-			_ufo_circle()
-			event_text = "UFO gecti! Tarla cemberi - altin urunler!"
+			ufo_active = true
+			ufo_t = 0.0
+			ufo_fired = false
+			ufo_target = randi() % states.size()
+			event_text = "UFO geldi! Tarla cemberi - altin urunler!"
 		2:
 			sell_boost_t = 18.0
 			event_text = "Gezgin tuccar geldi! Satis x1.5 (18 sn)"
 		3:
-			var eaten := _birds_eat()
-			event_text = "Kuslar %d olgun urunu yedi!" % eaten
+			birds_active = true
+			birds_t = 0.0
+			birds_done = false
+			birds_blocked = scarecrow_charges > 0
+			if birds_blocked:
+				scarecrow_charges -= 1
+			event_text = "Kuslar geliyor!"
 	event_flash = 2.8
 
 func _count_state(s: int) -> int:
@@ -455,10 +508,14 @@ func _count_state(s: int) -> int:
 			n += 1
 	return n
 
-func _ufo_circle() -> void:
-	if states.size() == 0:
+func _ufo_x() -> float:
+	var vp := get_viewport_rect().size
+	var f: float = clamp(ufo_t / UFO_DUR, 0.0, 1.0)
+	return lerp(-70.0, vp.x + 70.0, f)
+
+func _ufo_circle_at(center: int) -> void:
+	if states.size() == 0 or center < 0 or center >= states.size():
 		return
-	var center := randi() % states.size()
 	var cc := center % COLS
 	var cr := center / COLS
 	for dr in range(-1, 2):
@@ -560,6 +617,9 @@ func dura_cost() -> int:
 func well_cost() -> int:
 	return int(round(20.0 * pow(1.6, float(well_level))))
 
+func scare_cost() -> int:
+	return 16
+
 func windmill_cost() -> int:
 	return int(round(30.0 * pow(1.8, float(windmill_level))))
 
@@ -589,6 +649,12 @@ func _buy_well() -> void:
 	if coins >= c:
 		coins -= c
 		well_level += 1
+
+func _buy_scare() -> void:
+	var c := scare_cost()
+	if coins >= c:
+		coins -= c
+		scarecrow_charges = int(min(scarecrow_charges + SCARECROW_MAX, 99))
 
 func _buy_windmill() -> void:
 	var c := windmill_cost()
@@ -635,7 +701,7 @@ func _tab_items(tab: int) -> Array:
 		0:
 			return [TILL, PLANT, WATER, HARVEST, CLEAN, GOLD_HUNT]
 		1:
-			return [IT_WATER, IT_REPAIR, IT_YIELD, IT_SPEED, IT_DURA, IT_WELL]
+			return [IT_WATER, IT_REPAIR, IT_SCARE, IT_YIELD, IT_SPEED, IT_DURA, IT_WELL]
 		_:
 			return [IT_EXPAND, IT_WINDMILL, IT_DEPO]
 
@@ -655,6 +721,8 @@ func _item_cost(id: int) -> int:
 			return dura_cost()
 		IT_WELL:
 			return well_cost()
+		IT_SCARE:
+			return scare_cost()
 		IT_WINDMILL:
 			return windmill_cost()
 		IT_DEPO:
@@ -692,6 +760,8 @@ func _item_info(id: int) -> Array:
 			return [C_SOIL, "#", "Dayaniklilik+ (sv.%d)" % dura_level, "Botlar daha yavas yipranir"]
 		IT_WELL:
 			return [C_WATER, "~", "Su Kuyusu (sv.%d)" % well_level, "Pasif olarak su uretir"]
+		IT_SCARE:
+			return [C_GROW_A, "K", "Korkuluk (sarj %d)" % scarecrow_charges, "Kus saldirisini kovar (+%d sarj)" % SCARECROW_MAX]
 		IT_WINDMILL:
 			return [C_GROW_A, "M", "Degirmen (sv.%d)" % windmill_level, "Bugdayi una cevirir (un pahali)"]
 		IT_DEPO:
@@ -724,6 +794,8 @@ func _buy_item(id: int) -> bool:
 			_buy_dura()
 		IT_WELL:
 			_buy_well()
+		IT_SCARE:
+			_buy_scare()
 		IT_WINDMILL:
 			_buy_windmill()
 		IT_DEPO:
@@ -945,6 +1017,15 @@ func _draw() -> void:
 		if bot.condition <= 0.0:
 			draw_string(font, bot.pos + Vector2(-4, -rad - 8.0), "!", HORIZONTAL_ALIGNMENT_LEFT, -1, 22, C_RED)
 
+	if scarecrow_charges > 0:
+		_draw_scarecrow(vp)
+	if rain_t > 0.0:
+		_draw_rain(vp)
+	if ufo_active:
+		_draw_ufo(vp)
+	if birds_active:
+		_draw_birds(vp)
+
 	_draw_hud(font, vp)
 
 	if event_flash > 0.0:
@@ -1024,6 +1105,110 @@ func _draw_event(font: Font, vp: Vector2) -> void:
 	draw_rect(br, Color(C_SOIL.r, C_SOIL.g, C_SOIL.b, 0.92 * a), true)
 	draw_rect(br, Color(C_GOLD.r, C_GOLD.g, C_GOLD.b, a), false, 3.0)
 	draw_string(font, br.position + Vector2(16, 37), event_text, HORIZONTAL_ALIGNMENT_LEFT, bw - 32.0, 21, Color(1, 1, 1, a))
+
+func _ellipse_pts(c: Vector2, rx: float, ry: float, n: int) -> PackedVector2Array:
+	var pts := PackedVector2Array()
+	for i in range(n):
+		var ang := TAU * float(i) / float(n)
+		pts.append(c + Vector2(cos(ang) * rx, sin(ang) * ry))
+	return pts
+
+func _draw_rain(vp: Vector2) -> void:
+	var field_h := rows * tile
+	# fade in first 0.5s, fade out last 1.0s of the shower
+	var fade_in: float = clamp(rain_t / (RAIN_DUR - 0.5), 0.0, 1.0)
+	var fade_out: float = clamp(rain_t / 1.0, 0.0, 1.0)
+	var a: float = min(fade_in, fade_out)
+	var field := Rect2(0.0, origin.y, COLS * tile, field_h)
+	# wet soil: cool translucent overlay darkens/saturates the ground
+	draw_rect(field, Color(0.20, 0.32, 0.45, 0.22 * a), true)
+	# falling drops (deterministic, animated by clock)
+	var drop_col := Color(0.72, 0.84, 0.98, 0.7 * a)
+	var span := field_h + 90.0
+	for k in range(70):
+		var x: float = fmod(float(k) * 71.0, vp.x)
+		var speed: float = 650.0 + float(k % 6) * 70.0
+		var y: float = origin.y - 30.0 + fmod(clock * speed + float(k) * 47.0, span)
+		draw_line(Vector2(x, y), Vector2(x - 5.0, y + 16.0), drop_col, 2.0)
+	# splash ripples along a moving baseline near the ground
+	for k in range(10):
+		var sx: float = fmod(float(k) * 137.0 + clock * 40.0, COLS * tile)
+		var sy: float = origin.y + field_h - 6.0
+		draw_arc(Vector2(sx, sy), 4.0 + 2.0 * sin(clock * 6.0 + float(k)), 0.0, PI, 8, Color(0.8, 0.9, 1.0, 0.4 * a), 1.5)
+
+func _draw_ufo(vp: Vector2) -> void:
+	var cx := _ufo_x()
+	var uy := origin.y + tile * 0.7
+	# beam onto the target tile when the saucer is overhead
+	if ufo_target >= 0 and ufo_target < states.size():
+		var tc := _tile_center(ufo_target)
+		if abs(cx - tc.x) < tile * 1.4:
+			var beam := PackedVector2Array([
+				Vector2(cx - 8.0, uy + 6.0),
+				Vector2(cx + 8.0, uy + 6.0),
+				Vector2(tc.x + tile * 0.42, tc.y + tile * 0.2),
+				Vector2(tc.x - tile * 0.42, tc.y + tile * 0.2),
+			])
+			var pulse := 0.18 + 0.10 * sin(clock * 12.0)
+			draw_colored_polygon(beam, Color(0.65, 1.0, 0.55, pulse))
+			draw_circle(tc, tile * 0.30, Color(0.9, 1.0, 0.7, 0.18))
+	# saucer body
+	var disc := Color("#9AA0A6")
+	draw_colored_polygon(_ellipse_pts(Vector2(cx, uy), tile * 0.52, tile * 0.17, 28), disc)
+	draw_colored_polygon(_ellipse_pts(Vector2(cx, uy + 2.0), tile * 0.52, tile * 0.17, 28), disc.darkened(0.25))
+	# dome
+	draw_colored_polygon(_ellipse_pts(Vector2(cx, uy - tile * 0.06), tile * 0.22, tile * 0.18, 22), Color(0.6, 0.85, 0.95, 0.9))
+	draw_circle(Vector2(cx - tile * 0.06, uy - tile * 0.12), tile * 0.04, Color(1, 1, 1, 0.8))
+	# blinking belly lights
+	for li in range(3):
+		var lx := cx + float(li - 1) * tile * 0.26
+		var on := int(clock * 6.0 + li) % 2 == 0
+		var lc: Color = C_GOLD if on else C_GOLD.darkened(0.4)
+		draw_circle(Vector2(lx, uy + tile * 0.12), tile * 0.045, lc)
+
+func _bird_pos(i: int, vp: Vector2) -> Vector2:
+	var phase: float = float(i) * 0.1
+	var f: float = clamp(birds_t / BIRDS_DUR - phase, 0.0, 1.0)
+	var x: float = lerp(-60.0, vp.x + 60.0, f)
+	var dip: float = sin(f * PI)
+	if birds_blocked:
+		dip *= 0.35  # scared off — stay high, never reach the crops
+	var field_h: float = rows * tile
+	var ty: float = origin.y + field_h * (0.22 + 0.55 * (float(i) / float(BIRD_COUNT)))
+	var top_y: float = origin.y - 45.0
+	var y: float = lerp(top_y, ty, dip) + sin(clock * 8.0 + float(i)) * 3.0
+	return Vector2(x, y)
+
+func _draw_birds(vp: Vector2) -> void:
+	var col := Color("#33333A")
+	for i in range(BIRD_COUNT):
+		var p := _bird_pos(i, vp)
+		var w: float = tile * 0.17
+		var fl: float = 4.0 + 4.0 * sin(clock * 14.0 + float(i) * 1.3)  # wing flap
+		# seagull "M" silhouette
+		draw_polyline(PackedVector2Array([
+			p + Vector2(-w, -fl),
+			p + Vector2(-w * 0.25, fl * 0.3),
+			p,
+			p + Vector2(w * 0.25, fl * 0.3),
+			p + Vector2(w, -fl),
+		]), col, 2.5)
+
+func _draw_scarecrow(vp: Vector2) -> void:
+	var field_h := rows * tile
+	var base := Vector2(tile * 0.55, origin.y + field_h - 4.0)
+	var top := base + Vector2(0.0, -tile * 0.95)
+	var wood := Color("#6B4A2A")
+	# post + arms
+	draw_line(base, top, wood, 4.0)
+	var arm := tile * 0.30
+	draw_line(top + Vector2(-arm, tile * 0.16), top + Vector2(arm, tile * 0.16), wood, 4.0)
+	# straw head + hat
+	draw_circle(top + Vector2(0.0, -tile * 0.04), tile * 0.13, Color("#CDA94E"))
+	draw_line(top + Vector2(-tile * 0.15, -tile * 0.11), top + Vector2(tile * 0.15, -tile * 0.11), Color("#7A5524"), 4.0)
+	# charge count
+	var font := ThemeDB.fallback_font
+	draw_string(font, base + Vector2(-12.0, 13.0), "x%d" % scarecrow_charges, HORIZONTAL_ALIGNMENT_LEFT, -1, 14, Color(1, 1, 1, 0.9))
 
 func _store_row(r: Rect2, accent: Color, letter: String, title: String, desc: String, cost_text: String, on: bool) -> void:
 	var font := ThemeDB.fallback_font
