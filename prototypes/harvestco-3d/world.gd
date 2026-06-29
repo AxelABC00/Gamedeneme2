@@ -17,9 +17,11 @@ var _hud: Hud
 var _store: Store
 var _buildings: Array = []           # [{node, kind, aabb}] homestead buildings (tappable)
 var _bot_nodes: Array = []           # parallel to sim.bots: {root, task, phase, prev}
-var _zone_markers: Array = []        # glowing tiles showing the selected bot's zone
-var _tool: int = -1                  # active tool: -1 = hand (manual farm), >=0 = bot index
-var _erase: bool = false             # zone paint vs erase
+var _zone_markers: Array = []        # tinted tiles showing the shared bot work area
+var _tool: int = -1                  # active tool: -1 = hand (manual farm), 0 = paint work area
+# One shared work area for ALL bots. Paint it once; every specialist bot (current
+# and future) works inside it autonomously — till, plant, water, harvest in turn.
+var _shared_zone: Dictionary = {}
 # event visuals (Phase H) — created lazily, shown/hidden by _sync_events from sim state
 var _rain: GPUParticles3D
 var _ufo: Node3D
@@ -27,6 +29,21 @@ var _birds: Node3D
 var _trader: Node3D
 var _scarecrow: Node3D
 var _last_event_seq: int = 0         # toast fires when sim bumps event_seq
+# ambient life (always-on, not event-driven): gentle motion so the farm feels alive
+var _windmill_hub: Node3D            # spinning windmill blades
+var _homestead: Node3D               # container for buildings+scenery, slides back as the field grows
+var _props_back_z: float = 0.0       # field back-edge z at build time, to track homestead offset
+var _bed: MeshInstance3D             # raised soil bed under the plot (rebuilt on expand)
+var _sway: Array = []                # [{node, phase, amp}] trees/bushes that sway in the breeze
+var _butterflies: Array = []         # [{node, phase, center, wings:[l,r]}] wandering butterflies
+var _amb_t: float = 0.0              # ambient animation clock
+var _bird_phase: float = 0.0         # bird wing-flap clock
+var _wet: bool = false               # soil is visibly darkened/damp while it rains
+var _clouds: Array = []              # [{node, speed}] soft clouds drifting across the sky
+var _critters: Array = []            # [{node, center, phase, speed, radius}] wandering chickens
+var _smoke: Array = []               # [{node, mat, phase}] chimney smoke puffs
+var _smoke_base: Vector3 = Vector3.ZERO  # local origin of the chimney smoke column
+var _sfx: Node                       # procedural action sounds (till/plant/water/harvest)
 const PICK_Y := 0.10                 # soil surface height for tap raycast
 const BOT_SCALE := 1.45              # robots read clearly at the pulled-back camera
 const B_FARM := "farm"
@@ -55,6 +72,14 @@ func _ready() -> void:
 
 	_build_hud()
 
+	# cozy generative background music — synthesized live, no audio assets needed.
+	# loaded by path (not class_name) so it works in headless runs without an editor import.
+	add_child((load("res://music.gd") as GDScript).new())
+
+	# procedural action sound effects (till/plant/water/harvest) — also loaded by path.
+	_sfx = (load("res://sfx.gd") as GDScript).new()
+	add_child(_sfx)
+
 	if OS.has_environment("VERIFY_SHOT"):
 		_shoot()
 
@@ -68,14 +93,14 @@ func _build_hud() -> void:
 	_hud.seed_selected.connect(_on_seed_selected)
 	_hud.store_pressed.connect(_on_open_store)
 	_hud.tool_selected.connect(_on_tool_selected)
-	_hud.erase_toggled.connect(_on_erase_toggled)
+	_hud.clear_zone_pressed.connect(_on_clear_zone)
 
 	_store = Store.new()
 	add_child(_store)
 	_store.build(sim)
 	_store.buy_requested.connect(_on_store_buy)
 
-	_hud.refresh_tools(sim, _tool, _erase)
+	_hud.refresh_tools(sim, _tool)
 
 func _on_open_store() -> void:
 	_store.open_store(sim, 0)
@@ -92,16 +117,22 @@ func _on_store_buy(id: int) -> void:
 	_hud.refresh(sim)
 	_store.refresh(sim)
 	if res["close"]:
-		# a bot was bought — close, auto-select it, and let the player paint its zone
+		# a bot was bought — it joins the shared workforce: copy the current work
+		# area into it so it works the same zone automatically. We do NOT switch the
+		# player into paint mode (that used to block harvesting) — stay in hand mode.
 		_store.close_store()
-		_tool = sim.bots.size() - 1
-		_erase = false
-		_hud.refresh_tools(sim, _tool, _erase)
+		var nb = sim.bots[sim.bots.size() - 1]
+		for k in _shared_zone:
+			nb.zone[k] = true
+		_hud.refresh_tools(sim, _tool)
 		_update_zone_view()
-		_hud.toast("Bot geldi - bolge boya")
+		if _shared_zone.is_empty():
+			_hud.toast("Bot geldi - Bolge'ye basip alani boya")
+		else:
+			_hud.toast("Bot geldi - calisiyor")
 	else:
 		# upgrades/buildings can change bot count visuals (e.g. repair) — keep tools fresh
-		_hud.refresh_tools(sim, _tool, _erase)
+		_hud.refresh_tools(sim, _tool)
 
 # Rebuild the entire soil/crop plot after the field grows (buy_expand).
 func _rebuild_field() -> void:
@@ -127,6 +158,8 @@ func _rebuild_field() -> void:
 		_last_state[i] = -1
 		_last_bucket[i] = -1
 		_refresh_crop(i)
+	# field grew — slide the homestead back so the buildings stay clear of the plot
+	_reposition_homestead()
 
 func _on_sell() -> void:
 	var earned: int = sim.sell_all()
@@ -137,6 +170,8 @@ func _on_buy_water() -> void:
 	if sim.buy_water():
 		_hud.refresh(sim)
 		_hud.toast("Su +%d" % sim.WATER_BUNDLE)
+	elif sim.water >= sim.WATER_MAX:
+		_hud.toast("Su deposu dolu")
 	else:
 		_hud.toast("Para yetmiyor")
 
@@ -147,33 +182,50 @@ func _on_seed_selected(idx: int) -> void:
 # Player picked a tool: -1 = hand (manual farm), >=0 = paint that bot's zone.
 func _on_tool_selected(idx: int) -> void:
 	_tool = idx
-	_hud.refresh_tools(sim, _tool, _erase)
+	_hud.refresh_tools(sim, _tool)
 	_update_zone_view()
 
-func _on_erase_toggled(on: bool) -> void:
-	_erase = on
+# "Temizle" — wipe the whole shared work area (bounded, safe). Bots go idle.
+func _on_clear_zone() -> void:
+	_shared_zone.clear()
+	for bot in sim.bots:
+		bot.zone.clear()
+	_update_zone_view()
 
 func _process(delta: float) -> void:
 	sim.tick(delta)
-	# Rebuild a tile's plant when its state or growth bucket changes (6 visible steps).
+	# Rebuild a tile when it changes. On a STATE change (till/plant/water/harvest —
+	# whether by the player OR a bot) refresh the whole tile so the SOIL COLOUR updates
+	# too, not just the plant. On a pure growth-bucket change only the plant needs work.
 	for i in range(sim.states.size()):
 		var s: int = sim.states[i]
 		var bucket: int = int(sim.grow[i] * 6.0)
-		if s != _last_state[i] or bucket != _last_bucket[i]:
+		if s != _last_state[i]:
+			# a bot (or anything other than a direct tap) changed this tile — play its
+			# action sound. Manual taps play their own sound in _tap before refreshing.
+			if _last_state[i] != -1:
+				_play_action_sfx(_last_state[i], s)
+			_refresh_tile(i)
+		elif bucket != _last_bucket[i]:
 			_refresh_crop(i)
 	_sync_bots(delta)
 	_sync_events(delta)
+	_sync_ambient(delta)
+	# bots earn/harvest autonomously every frame, so keep the readouts live (depo, para,
+	# su) — otherwise the counters look frozen until the player next taps something.
+	if _hud != null:
+		_hud.refresh(sim)
 
 # ---------------------------------------------------------------- input (Phase C)
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventScreenTouch and event.pressed:
 		_tap(event.position)
 	elif event is InputEventScreenDrag:
-		_paint_at(event.position)        # finger drag paints a zone
+		_paint_at(event.position, false) # finger drag adds tiles to the zone
 	elif event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT and event.pressed:
 		_tap(event.position)
 	elif event is InputEventMouseMotion and (event.button_mask & MOUSE_BUTTON_MASK_LEFT) != 0:
-		_paint_at(event.position)        # mouse drag paints a zone (editor testing)
+		_paint_at(event.position, false) # mouse drag adds tiles (editor testing)
 
 func _tap(screen_pos: Vector2) -> void:
 	if _store != null and _store.is_open():
@@ -183,48 +235,58 @@ func _tap(screen_pos: Vector2) -> void:
 	if kind != "":
 		_on_building_tapped(kind)
 		return
-	# a bot tool is active -> a tap paints a single zone tile
+	# paint mode active -> a tap toggles that tile in/out of the work area
 	if _tool >= 0:
-		_paint_at(screen_pos)
+		_paint_at(screen_pos, true)
 		return
 	var idx := _tile_under(screen_pos)
 	if idx < 0:
 		return
+	var old_state: int = sim.states[idx]
 	var ok: bool = sim.manual(idx)
+	if ok:
+		if sim.states[idx] != old_state:
+			_play_action_sfx(old_state, sim.states[idx])
+		elif old_state == SimState.GROWING:
+			_play_action_sfx(SimState.PLANTED, SimState.GROWING)  # tending a crop = a water sound
 	_refresh_tile(idx)
 	_feedback(idx, ok)
 	if _hud != null:
 		_hud.refresh(sim)
 
-# Paint (or erase) the active bot's work zone at the tapped tile.
-func _paint_at(screen_pos: Vector2) -> void:
+# Edit the shared work zone at the tapped tile. A single tap (toggle=true) flips the
+# tile in/out of the zone; a drag (toggle=false) only adds, so sweeping paints an area.
+func _paint_at(screen_pos: Vector2, toggle: bool) -> void:
 	if _store != null and _store.is_open():
 		return
-	if _tool < 0 or _tool >= sim.bots.size():
+	if _tool < 0 or sim.bots.is_empty():
 		return
 	var idx := _tile_under(screen_pos)
 	if idx < 0:
 		return
-	var bot = sim.bots[_tool]
-	if _erase:
-		bot.zone.erase(idx)
+	# edit the shared work area, then mirror it onto every bot so they all work it
+	if toggle and _shared_zone.has(idx):
+		_shared_zone.erase(idx)
+		for bot in sim.bots:
+			bot.zone.erase(idx)
 	else:
-		if bot.zone.has(idx):
+		if _shared_zone.has(idx):
 			return
-		bot.zone[idx] = true
+		_shared_zone[idx] = true
+		for bot in sim.bots:
+			bot.zone[idx] = true
 	_update_zone_view()
 
-# Show the selected bot's zone as glowing tinted tiles (its task colour).
+# Show the shared work area as soft tinted tiles (only while in paint mode).
+const ZONE_COL := Color(0.45, 0.78, 0.95)   # calm cyan accent, not a task colour
 func _update_zone_view() -> void:
 	for m in _zone_markers:
 		if m != null:
 			m.queue_free()
 	_zone_markers.clear()
-	if _tool < 0 or _tool >= sim.bots.size():
+	if _tool < 0:
 		return
-	var bot = sim.bots[_tool]
-	var col: Color = sim.TASK_COL[bot.task]
-	for key in bot.zone:
+	for key in _shared_zone:
 		var i: int = key
 		if i >= sim.states.size():
 			continue
@@ -233,14 +295,14 @@ func _update_zone_view() -> void:
 		var bm := BoxMesh.new()
 		bm.size = Vector3(TILE * 0.94, 0.02, TILE * 0.94)
 		mk.mesh = bm
-		var mat := _mat(col, 0.4, 0.0)
+		var mat := _mat(ZONE_COL, 0.5, 0.0)
 		mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-		mat.albedo_color.a = 0.5
+		mat.albedo_color.a = 0.22
 		mat.emission_enabled = true
-		mat.emission = col
-		mat.emission_energy_multiplier = 0.6
+		mat.emission = ZONE_COL
+		mat.emission_energy_multiplier = 0.18
 		mk.material_override = mat
-		mk.position = _tile_pos(cr.x, cr.y) + Vector3(0, 0.22, 0)
+		mk.position = _tile_pos(cr.x, cr.y) + Vector3(0, 0.11, 0)
 		add_child(mk)
 		_zone_markers.append(mk)
 
@@ -290,10 +352,29 @@ func _tile_under(screen_pos: Vector2) -> int:
 	return r * SimState.COLS + c
 
 # Rebuild every visual for one tile after its state changed (soil tint, rock, plant).
+# Map a tile state transition to its action sound. Fires for BOTH manual taps and bot
+# work, since both go through the same EMPTY->TILLED->PLANTED->GROWING->RIPE lifecycle.
+func _play_action_sfx(old_state: int, new_state: int) -> void:
+	if _sfx == null:
+		return
+	if old_state == SimState.OBSTACLE and new_state == SimState.EMPTY:
+		_sfx.play("clean")
+	elif old_state == SimState.EMPTY and new_state == SimState.TILLED:
+		_sfx.play("till")
+	elif old_state == SimState.TILLED and new_state == SimState.PLANTED:
+		_sfx.play("plant")
+	elif old_state == SimState.PLANTED and new_state == SimState.GROWING:
+		_sfx.play("water")
+	elif old_state == SimState.RIPE and new_state == SimState.EMPTY:
+		_sfx.play("harvest")
+
 func _refresh_tile(idx: int) -> void:
 	var soil: MeshInstance3D = _soil_nodes[idx]
 	if soil != null:
-		soil.material_override = _mat(_soil_color(sim.states[idx]), 1.0)
+		var col: Color = _soil_color(sim.states[idx])
+		if _wet:
+			col = col.darkened(0.24)   # rain soaks the soil dark
+		soil.material_override = _mat(col, 0.55 if _wet else 1.0)  # damp sheen while raining
 	var rock: Node3D = _rock_nodes[idx]
 	if sim.states[idx] == SimState.OBSTACLE and rock == null:
 		var cr := _tile_cr(idx)
@@ -385,97 +466,105 @@ func _make_bot(task: int) -> Node3D:
 	var accent: Color = sim.TASK_COL[task]
 	var root := Node3D.new()
 
-	# dark tracked base + four wheels
-	var base := MeshInstance3D.new()
-	var basem := BoxMesh.new()
-	basem.size = Vector3(0.42, 0.12, 0.50)
-	base.mesh = basem
-	base.material_override = _mat(Color(0.17, 0.17, 0.20), 0.6, 0.15)
-	base.position = Vector3(0, 0.11, 0)
-	root.add_child(base)
-	for sx in [-0.24, 0.24]:
-		for sz in [-0.17, 0.17]:
-			var wheel := MeshInstance3D.new()
-			var wm := CylinderMesh.new()
-			wm.top_radius = 0.10; wm.bottom_radius = 0.10; wm.height = 0.07; wm.radial_segments = 10
-			wheel.mesh = wm
-			wheel.material_override = _mat(Color(0.09, 0.09, 0.10), 0.5, 0.2)
-			wheel.rotation_degrees = Vector3(0, 0, 90)
-			wheel.position = Vector3(sx, 0.10, sz)
-			root.add_child(wheel)
+	var dark := Color(0.15, 0.16, 0.21)
+	# the body wears a soft pastel of the task colour so each bot reads its job at a
+	# glance; the head stays light for a friendly face that contrasts the coloured body.
+	var body_col: Color = accent
 
-	# cream chassis
+	# smooth rounded hover-base (a soft disc instead of a boxy tracked chassis)
+	var base := MeshInstance3D.new()
+	var basem := CylinderMesh.new()
+	basem.top_radius = 0.19; basem.bottom_radius = 0.23; basem.height = 0.12; basem.radial_segments = 18
+	base.mesh = basem
+	base.material_override = _mat(dark, 0.45, 0.25)
+	base.position = Vector3(0, 0.10, 0)
+	root.add_child(base)
+	# glowing accent band wrapping the base — colour-codes the specialist
+	var band := MeshInstance3D.new()
+	var bandm := CylinderMesh.new()
+	bandm.top_radius = 0.235; bandm.bottom_radius = 0.235; bandm.height = 0.045; bandm.radial_segments = 18
+	band.mesh = bandm
+	var bandmat := _mat(accent, 0.3, 0.0)
+	bandmat.emission_enabled = true; bandmat.emission = accent; bandmat.emission_energy_multiplier = 0.8
+	band.material_override = bandmat
+	band.position = Vector3(0, 0.135, 0)
+	root.add_child(band)
+
+	# smooth capsule body, cream — rounded and friendly
 	var body := MeshInstance3D.new()
-	var bodym := BoxMesh.new()
-	bodym.size = Vector3(0.40, 0.34, 0.40)
+	var bodym := CapsuleMesh.new()
+	bodym.radius = 0.195; bodym.height = 0.50; bodym.radial_segments = 18; bodym.rings = 10
 	body.mesh = bodym
-	body.material_override = _mat(Color(0.93, 0.91, 0.87), 0.5, 0.05)
-	body.position = Vector3(0, 0.35, 0)
+	body.material_override = _mat(body_col, 0.4, 0.05)
+	body.position = Vector3(0, 0.42, 0)
 	root.add_child(body)
 
-	# task-colour belly panel (glows softly)
-	var panel := MeshInstance3D.new()
-	var pm := BoxMesh.new()
-	pm.size = Vector3(0.30, 0.16, 0.02)
-	panel.mesh = pm
-	var pmat := _mat(accent, 0.4, 0.1)
-	pmat.emission_enabled = true; pmat.emission = accent; pmat.emission_energy_multiplier = 0.45
-	panel.material_override = pmat
-	panel.position = Vector3(0, 0.33, 0.205)
-	root.add_child(panel)
+	# task-colour glowing belly orb (a cute round indicator)
+	var belly := MeshInstance3D.new()
+	var bem := SphereMesh.new()
+	bem.radius = 0.085; bem.height = 0.17; bem.radial_segments = 14; bem.rings = 9
+	belly.mesh = bem
+	var belly_col: Color = accent.lightened(0.55)
+	var bmat := _mat(belly_col, 0.3, 0.0)
+	bmat.emission_enabled = true; bmat.emission = belly_col; bmat.emission_energy_multiplier = 0.9
+	belly.material_override = bmat
+	belly.position = Vector3(0, 0.40, 0.165)
+	root.add_child(belly)
 
-	# head + dark visor + two glowing eyes
+	# domed head + curved dark visor + two glowing eyes
 	var head := MeshInstance3D.new()
-	var hm := BoxMesh.new()
-	hm.size = Vector3(0.30, 0.22, 0.28)
+	var hm := SphereMesh.new()
+	hm.radius = 0.165; hm.height = 0.30; hm.radial_segments = 18; hm.rings = 11
 	head.mesh = hm
-	head.material_override = _mat(Color(0.97, 0.96, 0.93), 0.45, 0.05)
-	head.position = Vector3(0, 0.63, 0)
+	head.material_override = _mat(accent.lightened(0.3), 0.4, 0.05)
+	head.position = Vector3(0, 0.70, 0)
 	root.add_child(head)
 	var visor := MeshInstance3D.new()
-	var vm := BoxMesh.new()
-	vm.size = Vector3(0.26, 0.10, 0.03)
+	var vm := SphereMesh.new()
+	vm.radius = 0.14; vm.height = 0.28; vm.radial_segments = 18; vm.rings = 9
 	visor.mesh = vm
-	visor.material_override = _mat(Color(0.10, 0.12, 0.16), 0.15, 0.4)
-	visor.position = Vector3(0, 0.64, 0.14)
+	visor.material_override = _mat(Color(0.09, 0.11, 0.16), 0.1, 0.5)
+	visor.scale = Vector3(1.0, 0.5, 0.72)
+	visor.position = Vector3(0, 0.71, 0.07)
 	root.add_child(visor)
-	for ex in [-0.06, 0.06]:
+	for ex in [-0.05, 0.05]:
 		var eye := MeshInstance3D.new()
 		var em := SphereMesh.new()
-		em.radius = 0.028; em.height = 0.056; em.radial_segments = 8; em.rings = 6
+		em.radius = 0.025; em.height = 0.05; em.radial_segments = 10; em.rings = 6
 		eye.mesh = em
 		var emat := _mat(accent, 0.2, 0.0)
-		emat.emission_enabled = true; emat.emission = accent.lightened(0.3); emat.emission_energy_multiplier = 2.6
+		emat.emission_enabled = true; emat.emission = accent.lightened(0.35); emat.emission_energy_multiplier = 3.0
 		eye.material_override = emat
-		eye.position = Vector3(ex, 0.645, 0.16)
+		eye.position = Vector3(ex, 0.715, 0.155)
 		root.add_child(eye)
 
-	# antenna + task-colour bulb
+	# slim antenna + task-colour bulb
 	var ant := MeshInstance3D.new()
 	var am := CylinderMesh.new()
-	am.top_radius = 0.012; am.bottom_radius = 0.016; am.height = 0.16; am.radial_segments = 6
+	am.top_radius = 0.008; am.bottom_radius = 0.012; am.height = 0.14; am.radial_segments = 6
 	ant.mesh = am
 	ant.material_override = _mat(Color(0.30, 0.30, 0.32), 0.5, 0.3)
-	ant.position = Vector3(0.0, 0.82, 0.0)
+	ant.position = Vector3(0.0, 0.90, 0.0)
 	root.add_child(ant)
 	var bulb := MeshInstance3D.new()
 	var blm := SphereMesh.new()
-	blm.radius = 0.04; blm.height = 0.08; blm.radial_segments = 8; blm.rings = 6
+	blm.radius = 0.035; blm.height = 0.07; blm.radial_segments = 10; blm.rings = 6
 	bulb.mesh = blm
 	var blmat := _mat(accent, 0.2, 0.0)
-	blmat.emission_enabled = true; blmat.emission = accent; blmat.emission_energy_multiplier = 2.0
+	blmat.emission_enabled = true; blmat.emission = accent; blmat.emission_energy_multiplier = 2.2
 	bulb.material_override = blmat
-	bulb.position = Vector3(0, 0.92, 0)
+	bulb.position = Vector3(0, 0.99, 0)
 	root.add_child(bulb)
 
-	# two little side arms
-	for sx in [-0.245, 0.245]:
+	# two rounded little arms (short capsules, angled outward)
+	for sx in [-0.2, 0.2]:
 		var arm := MeshInstance3D.new()
-		var arm_m := BoxMesh.new()
-		arm_m.size = Vector3(0.06, 0.20, 0.08)
+		var arm_m := CapsuleMesh.new()
+		arm_m.radius = 0.042; arm_m.height = 0.19; arm_m.radial_segments = 10; arm_m.rings = 4
 		arm.mesh = arm_m
-		arm.material_override = _mat(Color(0.85, 0.83, 0.80), 0.5, 0.05)
-		arm.position = Vector3(sx, 0.37, 0.05)
+		arm.material_override = _mat(body_col.darkened(0.08), 0.45, 0.05)
+		arm.rotation_degrees = Vector3(0, 0, 20 if sx > 0 else -20)
+		arm.position = Vector3(sx, 0.42, 0.03)
 		root.add_child(arm)
 
 	root.scale = Vector3.ONE * BOT_SCALE
@@ -496,7 +585,7 @@ func _sync_events(delta: float) -> void:
 			_hud.toast(sim.event_msg)
 	_sync_rain()
 	_sync_ufo(delta)
-	_sync_birds()
+	_sync_birds(delta)
 	_sync_trader()
 	_sync_scarecrow()
 
@@ -508,6 +597,11 @@ func _sync_rain() -> void:
 	if _rain:
 		_rain.emitting = on
 		_rain.visible = on
+	# darken every tile while it rains, restore when it stops (toggle on transitions)
+	if on != _wet:
+		_wet = on
+		for i in range(_soil_nodes.size()):
+			_refresh_tile(i)
 
 func _sync_ufo(delta: float) -> void:
 	if not sim.ufo_active:
@@ -528,7 +622,7 @@ func _sync_ufo(delta: float) -> void:
 	_ufo.position = Vector3(x, 4.6, tz)
 	_ufo.rotate_y(delta * 2.5)
 
-func _sync_birds() -> void:
+func _sync_birds(delta: float) -> void:
 	if not sim.birds_active:
 		if _birds:
 			_birds.visible = false
@@ -542,6 +636,75 @@ func _sync_birds() -> void:
 	var x: float = lerp(-half.x - 4.0, half.x + 4.0, f)
 	var y: float = 4.2 - sin(f * PI) * 2.3   # dip toward the crops at mid-flight, stay readable
 	_birds.position = Vector3(x, y, 0.0)
+	_birds.rotation.y = -PI * 0.5   # face the flock along its travel direction (+x)
+	# flap each bird's wings smoothly. Time-based (not per-frame) so the speed is the
+	# same at any framerate; each bird offset by its own stored phase so they're not
+	# all synced. Wings pivot from the shoulder hinge, sweeping down-to-up.
+	_bird_phase += delta * 9.0
+	for b in _birds.get_children():
+		var bird_phase: float = b.get_meta("phase", 0.0)
+		var flap: float = sin(_bird_phase + bird_phase)
+		var raise: float = 0.35 + flap * 0.55   # ~ -0.2 .. +0.9 rad
+		var wings: Array = b.get_meta("wings", [])
+		if wings.size() == 2:
+			wings[0].rotation.z = raise     # left shoulder
+			wings[1].rotation.z = -raise    # right shoulder
+
+# Always-on ambient life: windmill spin, breeze sway on foliage, drifting butterflies.
+func _sync_ambient(delta: float) -> void:
+	_amb_t += delta
+	if _windmill_hub != null:
+		_windmill_hub.rotation.z += delta * 0.7
+	for s in _sway:
+		var node: Node3D = s["node"]
+		node.rotation.z = sin(_amb_t * 1.1 + s["phase"]) * s["amp"]
+	for bf in _butterflies:
+		var node: Node3D = bf["node"]
+		var ph: float = bf["phase"]
+		var c: Vector3 = bf["center"]
+		# lazy figure-eight drift around the patch centre, gentle bob
+		node.position = c + Vector3(
+				sin(_amb_t * 0.7 + ph) * 1.1,
+				sin(_amb_t * 2.3 + ph) * 0.22,
+				cos(_amb_t * 0.5 + ph) * 0.9)
+		# face travel direction so it banks through the turns
+		node.rotation.y = _amb_t * 0.5 + ph
+		var fl: float = 0.7 + sin(_amb_t * 14.0 + ph) * 0.7   # rapid wing flutter
+		var wings: Array = bf["wings"]
+		wings[0].rotation.z = fl
+		wings[1].rotation.z = -fl
+	# clouds drift slowly across the sky and wrap around when they leave the frame
+	for cl in _clouds:
+		var node: Node3D = cl["node"]
+		node.position.x += cl["speed"] * delta
+		if node.position.x > 14.0:
+			node.position.x = -14.0
+	# chimney smoke: each puff rises, swells and fades on its own looping phase
+	for sm in _smoke:
+		var node: Node3D = sm["node"]
+		var t: float = fmod(_amb_t * 0.35 + sm["phase"], 1.0)
+		node.position = _smoke_base + Vector3(sin(t * 6.0 + sm["phase"] * 9.0) * 0.18, t * 1.7, 0.0)
+		var sc: float = 0.5 + t * 1.4
+		node.scale = Vector3(sc, sc, sc)
+		var mat: StandardMaterial3D = sm["mat"]
+		mat.albedo_color.a = (1.0 - t) * 0.5
+	# chickens wander in lazy loops, hop a little, and face the way they're walking
+	for cr in _critters:
+		var node2: Node3D = cr["node"]
+		var c: Vector3 = cr["center"]
+		var ph2: float = cr["phase"]
+		var sp: float = cr["speed"]
+		var rad: float = cr["radius"]
+		var a: float = _amb_t * sp + ph2
+		var p0 := c + Vector3(cos(a) * rad, 0.0, sin(a * 0.8) * rad * 0.7)
+		var a1: float = a + 0.08
+		var p1 := c + Vector3(cos(a1) * rad, 0.0, sin(a1 * 0.8) * rad * 0.7)
+		var hop: float = abs(sin(_amb_t * 6.0 + ph2)) * 0.05
+		node2.position = p0 + Vector3(0.0, hop, 0.0)
+		var head := p1 - p0
+		if head.length() > 0.0001:
+			node2.rotation.y = atan2(head.x, head.z)
+		node2.rotation.x = sin(_amb_t * 5.0 + ph2) * 0.12   # gentle pecking bob
 
 func _sync_trader() -> void:
 	var on: bool = sim.sell_boost_t > 0.0
@@ -642,14 +805,28 @@ func _make_birds() -> Node3D:
 	for k in range(SimState.BIRD_COUNT):
 		var b := Node3D.new()
 		b.position = Vector3(randf_range(-1.8, 1.8), randf_range(-0.6, 0.6), randf_range(-1.8, 1.8))
+		b.set_meta("phase", float(k) * 1.1)   # de-sync the flock's flapping
+		# a small rounded body so the bird reads as more than two flat wings
+		var body := MeshInstance3D.new()
+		var bodym := SphereMesh.new(); bodym.radius = 0.10; bodym.height = 0.20
+		body.mesh = bodym
+		body.scale = Vector3(0.9, 0.8, 1.8)   # elongated head-to-tail
+		body.material_override = dark
+		b.add_child(body)
+		# each wing pivots from a shoulder hinge at the body, mesh offset outward so it
+		# sweeps like a real wing instead of spinning around its own middle.
+		var wings: Array = []
 		for s in [-1.0, 1.0]:
+			var hinge := Node3D.new()
+			b.add_child(hinge)
 			var w := MeshInstance3D.new()
-			var wm := BoxMesh.new(); wm.size = Vector3(0.55, 0.07, 0.2)
+			var wm := BoxMesh.new(); wm.size = Vector3(0.5, 0.035, 0.24)
 			w.mesh = wm
 			w.material_override = dark
-			w.position = Vector3(s * 0.2, 0.0, 0.0)
-			w.rotation.z = -s * 0.5
-			b.add_child(w)
+			w.position = Vector3(s * 0.28, 0.0, 0.0)
+			hinge.add_child(w)
+			wings.append(hinge)
+		b.set_meta("wings", wings)
 		root.add_child(b)
 	return root
 
@@ -685,28 +862,125 @@ func _make_trader() -> Node3D:
 			root.add_child(wheel)
 	return root
 
+# Detailed cozy scarecrow: weathered cross frame, stuffed burlap body with straw
+# tufts bursting from the cuffs and hem, a stitched sack head, a floppy straw hat,
+# and a little crow perched on one arm.
 func _make_scarecrow() -> Node3D:
 	var root := Node3D.new()
-	var post := MeshInstance3D.new()
-	var pm := BoxMesh.new(); pm.size = Vector3(0.1, 1.3, 0.1)
-	post.mesh = pm; post.position.y = 0.65
-	post.material_override = _mat(Color(0.45, 0.3, 0.16), 0.9)
+	var wood := Color(0.42, 0.28, 0.15)
+	var straw := Color(0.86, 0.68, 0.28)
+	var burlap := Color(0.74, 0.55, 0.32)
+	var shirt := Color(0.55, 0.30, 0.28)   # faded plaid red
+
+	# --- weathered wooden cross frame ---
+	var post := _cyl_node(wood, 0.055, 1.75, 6)
+	post.position.y = 0.875
+	post.rotation.z = 0.04   # slight lean, looks hand-made
 	root.add_child(post)
-	var arms := MeshInstance3D.new()
-	var am := BoxMesh.new(); am.size = Vector3(1.0, 0.1, 0.1)
-	arms.mesh = am; arms.position.y = 0.95
-	arms.material_override = _mat(Color(0.45, 0.3, 0.16), 0.9)
+	var arms := _cyl_node(wood, 0.045, 1.5, 6)
+	arms.rotation.z = PI * 0.5
+	arms.position.y = 1.18
 	root.add_child(arms)
-	var head := MeshInstance3D.new()
-	var hm := SphereMesh.new(); hm.radius = 0.18; hm.height = 0.36
-	head.mesh = hm; head.position.y = 1.4
-	head.material_override = _mat(Color(0.85, 0.72, 0.4), 0.85)
+
+	# --- stuffed burlap torso (a sack cinched at the waist) ---
+	var torso := _ball_node(shirt, 0.30, 0.9, 8)
+	torso.scale = Vector3(0.85, 1.25, 0.7)
+	torso.position.y = 0.95
+	root.add_child(torso)
+	# rope belt
+	var belt := _cyl_node(Color(0.5, 0.4, 0.2), 0.27, 0.08, 8)
+	belt.position.y = 0.72
+	belt.scale = Vector3(0.95, 1.0, 0.75)
+	root.add_child(belt)
+	# a stitched patch on the chest
+	var patch := MeshInstance3D.new()
+	var patm := BoxMesh.new(); patm.size = Vector3(0.16, 0.16, 0.02)
+	patch.mesh = patm
+	patch.material_override = _mat(Color(0.40, 0.55, 0.40), 0.95)
+	patch.position = Vector3(-0.1, 1.0, 0.21)
+	root.add_child(patch)
+
+	# --- sleeves along the arms, with straw bursting from the cuffs ---
+	for s in [-1.0, 1.0]:
+		var sleeve := _cyl_node(shirt, 0.075, 0.62, 6)
+		sleeve.rotation.z = PI * 0.5
+		sleeve.position = Vector3(s * 0.42, 1.18, 0.0)
+		root.add_child(sleeve)
+		# straw cuff tufts (three little cones pointing outward)
+		for t in range(3):
+			var tuft := _cone_node(straw, 0.06, 0.22, 5)
+			tuft.rotation.z = s * (PI * 0.5) + (float(t) - 1.0) * 0.4
+			tuft.position = Vector3(s * 0.74, 1.18 + (float(t) - 1.0) * 0.06, 0.0)
+			root.add_child(tuft)
+
+	# --- straw bursting from the hem at the bottom ---
+	for h in range(5):
+		var ang: float = TAU * float(h) / 5.0
+		var leg := _cone_node(straw, 0.06, 0.30, 5)
+		leg.rotation.x = PI   # point down
+		leg.position = Vector3(cos(ang) * 0.14, 0.58, sin(ang) * 0.10)
+		root.add_child(leg)
+
+	# --- stitched burlap sack head ---
+	var head := _ball_node(burlap, 0.20, 0.95, 8)
+	head.scale = Vector3(1.0, 1.1, 1.0)
+	head.position.y = 1.50
 	root.add_child(head)
-	var hat := MeshInstance3D.new()
-	var hatm := CylinderMesh.new(); hatm.top_radius = 0.12; hatm.bottom_radius = 0.32; hatm.height = 0.18
-	hat.mesh = hatm; hat.position.y = 1.56
-	hat.material_override = _mat(Color(0.5, 0.32, 0.15), 0.9)
-	root.add_child(hat)
+	# cinch at the neck
+	var neck := _cyl_node(Color(0.5, 0.4, 0.2), 0.09, 0.06, 6)
+	neck.position.y = 1.34
+	root.add_child(neck)
+	# straw fringe poking out under the head
+	for f in range(4):
+		var fa: float = TAU * float(f) / 4.0 + 0.4
+		var fr := _cone_node(straw, 0.035, 0.14, 4)
+		fr.rotation.x = PI * 0.8
+		fr.position = Vector3(cos(fa) * 0.14, 1.36, sin(fa) * 0.12)
+		root.add_child(fr)
+	# stitched X eyes + a button nose
+	var dark := _mat(Color(0.15, 0.1, 0.08), 0.9)
+	for s2 in [-1.0, 1.0]:
+		for d in [-1.0, 1.0]:
+			var st := MeshInstance3D.new()
+			var stm := BoxMesh.new(); stm.size = Vector3(0.07, 0.012, 0.012)
+			st.mesh = stm
+			st.material_override = dark
+			st.rotation.z = d * 0.8
+			st.position = Vector3(s2 * 0.085, 1.53, 0.19)
+			root.add_child(st)
+	var nose := _ball_node(Color(0.2, 0.5, 0.25), 0.03, 0.5, 6)
+	nose.position = Vector3(0.0, 1.47, 0.20)
+	root.add_child(nose)
+
+	# --- floppy straw hat: wide brim disc + cone crown + band ---
+	var brim := _cyl_node(Color(0.80, 0.62, 0.26), 0.40, 0.04, 10)
+	brim.position.y = 1.66
+	brim.rotation.x = 0.06   # tilted, jaunty
+	root.add_child(brim)
+	var crown := _cone_node(Color(0.84, 0.66, 0.30), 0.24, 0.30, 8)
+	crown.position.y = 1.80
+	root.add_child(crown)
+	var band := _cyl_node(Color(0.45, 0.30, 0.16), 0.245, 0.05, 10)
+	band.position.y = 1.69
+	root.add_child(band)
+
+	# --- a cheeky little crow perched on the right arm ---
+	var crow := Node3D.new()
+	crow.position = Vector3(0.62, 1.27, 0.0)
+	var crow_dark := _mat(Color(0.12, 0.12, 0.15), 0.7)
+	var cbody := _ball_node(Color(0.12, 0.12, 0.15), 0.07, 0.7, 6)
+	cbody.scale = Vector3(1.0, 1.0, 1.6)
+	cbody.material_override = crow_dark
+	crow.add_child(cbody)
+	var chead := _ball_node(Color(0.12, 0.12, 0.15), 0.045, 0.7, 6)
+	chead.material_override = crow_dark
+	chead.position = Vector3(0.0, 0.06, 0.09)
+	crow.add_child(chead)
+	var cbeak := _cone_node(Color(0.9, 0.7, 0.2), 0.02, 0.06, 4)
+	cbeak.rotation.x = PI * 0.5
+	cbeak.position = Vector3(0.0, 0.06, 0.15)
+	crow.add_child(cbeak)
+	root.add_child(crow)
 	return root
 
 # ---------------------------------------------------------------- build
@@ -714,14 +988,17 @@ func _build_soil_tiles() -> void:
 	var n: int = sim.states.size()
 	_soil_nodes.resize(n)
 	_rock_nodes.resize(n)
-	# Raised soil bed under the plot.
+	# Raised soil bed under the plot (freed + rebuilt on expand so it doesn't stack up).
+	if _bed != null:
+		_bed.queue_free()
 	var bed := MeshInstance3D.new()
 	var bm := BoxMesh.new()
 	bm.size = Vector3(SimState.COLS * TILE + 0.4, 0.18, sim.rows * TILE + 0.4)
 	bed.mesh = bm
-	bed.material_override = _mat(Color(0.30, 0.21, 0.14), 1.0)
+	bed.material_override = _mat(Color(0.28, 0.19, 0.12), 1.0)
 	bed.position = Vector3(0, -0.04, 0)
 	add_child(bed)
+	_bed = bed
 
 	for i in range(n):
 		var cr := _tile_cr(i)
@@ -771,84 +1048,523 @@ func _refresh_crop(i: int) -> void:
 	_crop_nodes[i] = holder
 
 	var grow_f: float = sim.grow[i] if s == SimState.GROWING else (1.0 if s == SimState.RIPE else 0.0)
-	var stem_h: float
+	# growth scale: a sprout at PLANTED, ramps through GROWING, full size at RIPE.
+	var gs: float
 	match s:
 		SimState.PLANTED:
-			stem_h = 0.10
+			gs = 0.30
 		SimState.GROWING:
-			stem_h = 0.14 + grow_f * 0.42
+			gs = 0.40 + grow_f * 0.60
 		_:
-			stem_h = 0.58
+			gs = 1.0
+	var is_gold: bool = s == SimState.RIPE and bool(sim.golden[i])
+	_build_crop(holder, sim.crop_type[i], s, gs, is_gold)
 
-	# stem
-	var stem := MeshInstance3D.new()
+# ---- per-crop procedural plants ----------------------------------------------
+# Each crop reads as itself (beet bulb, tomato vine, wheat stalks, melon on the
+# ground, ...) instead of a generic stem+blob. The leafy body scales with growth;
+# the signature fruit only appears at RIPE (gold + emissive on golden tiles).
+const LEAF_COL := Color(0.31, 0.53, 0.24)
+const LEAF_DARK := Color(0.21, 0.40, 0.19)
+const WOOD_COL := Color(0.46, 0.33, 0.21)
+
+func _build_crop(holder: Node3D, ct: int, s: int, gs: float, is_gold: bool) -> void:
+	var ripe: bool = s == SimState.RIPE
+	match ct:
+		0: _crop_beet(holder, gs, ripe, is_gold)
+		1: _crop_potato(holder, gs, ripe, is_gold)
+		2: _crop_tomato(holder, gs, ripe, is_gold)
+		3: _crop_wheat(holder, gs, ripe, is_gold)
+		4: _crop_squash(holder, gs, ripe, is_gold)
+		5: _crop_grapes(holder, gs, ripe, is_gold)
+		6: _crop_watermelon(holder, gs, ripe, is_gold)
+		_: _crop_beet(holder, gs, ripe, is_gold)
+
+func _cone_node(col: Color, base_r: float, h: float, segs: int = 6) -> MeshInstance3D:
+	var m := MeshInstance3D.new()
 	var cm := CylinderMesh.new()
-	cm.top_radius = 0.03
-	cm.bottom_radius = 0.05
-	cm.height = stem_h
-	cm.radial_segments = 5
-	stem.mesh = cm
-	stem.material_override = _mat(Color(0.32, 0.54, 0.25), 0.9)
-	stem.position = Vector3(0, stem_h * 0.5, 0)
-	holder.add_child(stem)
+	cm.top_radius = 0.0
+	cm.bottom_radius = base_r
+	cm.height = h
+	cm.radial_segments = segs
+	m.mesh = cm
+	m.material_override = _mat(col, 0.85)
+	return m
 
-	# foliage
-	var leaf := MeshInstance3D.new()
-	var lr: float = 0.07 + stem_h * 0.20
+func _ball_node(col: Color, r: float, rough: float = 0.55, segs: int = 8) -> MeshInstance3D:
+	var m := MeshInstance3D.new()
 	var sm := SphereMesh.new()
-	sm.radius = lr
-	sm.height = lr * 2.0
-	sm.radial_segments = 6
-	sm.rings = 4
-	leaf.mesh = sm
-	leaf.material_override = _mat(Color(0.27, 0.50, 0.23), 0.9)
-	leaf.position = Vector3(0, stem_h + lr * 0.3, 0)
-	holder.add_child(leaf)
+	sm.radius = r
+	sm.height = r * 2.0
+	sm.radial_segments = segs
+	sm.rings = 5
+	m.mesh = sm
+	m.material_override = _mat(col, rough)
+	return m
 
-	# ripe fruit — crop's signature color, gold + glow if golden
-	if s == SimState.RIPE:
-		var crop_col: Color = sim.CROPS[sim.crop_type[i]]["col"]
-		var is_gold: bool = bool(sim.golden[i])
-		var fruit := MeshInstance3D.new()
-		var fr: float = 0.16 if is_gold else 0.14
-		var fm := SphereMesh.new()
-		fm.radius = fr
-		fm.height = fr * 2.0
-		fruit.mesh = fm
-		var fmat := _mat(Color(0.97, 0.78, 0.18) if is_gold else crop_col, 0.45, 0.0)
-		if is_gold:
-			fmat.emission_enabled = true
-			fmat.emission = Color(1.0, 0.84, 0.22)
-			fmat.emission_energy_multiplier = 2.2
-		fruit.material_override = fmat
-		# sit the fruit as a crown above the foliage so its colour reads
-		fruit.position = Vector3(0, stem_h + lr * 1.4 + fr * 0.5, 0)
-		holder.add_child(fruit)
+func _cyl_node(col: Color, r: float, h: float, segs: int = 5) -> MeshInstance3D:
+	var m := MeshInstance3D.new()
+	var cm := CylinderMesh.new()
+	cm.top_radius = r
+	cm.bottom_radius = r
+	cm.height = h
+	cm.radial_segments = segs
+	m.mesh = cm
+	m.material_override = _mat(col, 0.8)
+	return m
+
+func _fruit_mat(col: Color, is_gold: bool) -> StandardMaterial3D:
+	var m := _mat(Color(0.97, 0.78, 0.18) if is_gold else col, 0.4, 0.0)
+	if is_gold:
+		m.emission_enabled = true
+		m.emission = Color(1.0, 0.84, 0.22)
+		m.emission_energy_multiplier = 2.0
+	return m
+
+# A fan of upright leaves around the centre — the green top of root crops.
+func _leaf_fan(holder: Node3D, count: int, spread: float, h: float, col: Color, base_y: float) -> void:
+	for k in count:
+		var ang: float = TAU * float(k) / float(count)
+		var leaf := _cone_node(col, h * 0.16, h)
+		leaf.rotation = Vector3(deg_to_rad(26.0), ang, 0.0)
+		leaf.position = Vector3(cos(ang) * spread, base_y + h * 0.42, sin(ang) * spread)
+		holder.add_child(leaf)
+
+func _crop_beet(holder: Node3D, gs: float, ripe: bool, is_gold: bool) -> void:
+	var h: float = 0.34 * gs
+	_leaf_fan(holder, 6, 0.05 * gs, h, LEAF_COL, 0.02)
+	if ripe:
+		var col: Color = sim.CROPS[0]["col"]
+		var bulb := _ball_node(col, 0.16)
+		bulb.material_override = _fruit_mat(col, is_gold)
+		bulb.scale = Vector3(1.0, 0.85, 1.0)
+		bulb.position = Vector3(0, 0.10, 0)
+		holder.add_child(bulb)
+
+func _crop_potato(holder: Node3D, gs: float, ripe: bool, is_gold: bool) -> void:
+	var bush_h: float = 0.26 * gs
+	var clumps := [Vector3(0, 0, 0), Vector3(0.10, 0.04, 0.06), Vector3(-0.09, 0.02, -0.07), Vector3(0.05, 0.06, -0.09)]
+	for k in clumps.size():
+		var c: Vector3 = clumps[k]
+		var clump := _ball_node(LEAF_COL if k % 2 == 0 else LEAF_DARK, 0.11 * gs, 0.7)
+		clump.position = Vector3(c.x, bush_h + c.y, c.z)
+		holder.add_child(clump)
+	if ripe:
+		var col: Color = sim.CROPS[1]["col"]
+		for p in [Vector3(0.12, 0.05, 0.0), Vector3(-0.10, 0.05, 0.08), Vector3(0.02, 0.05, -0.12)]:
+			var tuber := _ball_node(col, 0.075, 0.7)
+			tuber.material_override = _fruit_mat(col, is_gold)
+			tuber.scale = Vector3(1.2, 0.8, 1.0)
+			tuber.position = p
+			holder.add_child(tuber)
+
+func _crop_tomato(holder: Node3D, gs: float, ripe: bool, is_gold: bool) -> void:
+	var h: float = 0.55 * gs
+	var stake := _cyl_node(WOOD_COL, 0.018, h)
+	stake.position = Vector3(0, h * 0.5, 0)
+	holder.add_child(stake)
+	for fy in [0.35, 0.62, 0.85]:
+		var clump := _ball_node(LEAF_COL, 0.14 * gs, 0.7)
+		clump.position = Vector3(0, h * fy, 0)
+		holder.add_child(clump)
+	if ripe:
+		var col: Color = sim.CROPS[2]["col"]
+		var spots := [Vector3(0.12, h * 0.45, 0.04), Vector3(-0.11, h * 0.55, -0.05), Vector3(0.06, h * 0.66, 0.11), Vector3(-0.04, h * 0.40, -0.10)]
+		for p in spots:
+			var t := _ball_node(col, 0.072, 0.35)
+			t.material_override = _fruit_mat(col, is_gold)
+			t.position = p
+			holder.add_child(t)
+
+func _crop_wheat(holder: Node3D, gs: float, ripe: bool, is_gold: bool) -> void:
+	var h: float = 0.62 * gs
+	var stalk_col: Color = Color(0.83, 0.72, 0.32) if ripe else Color(0.62, 0.70, 0.34)
+	var offs := [Vector2(0, 0), Vector2(0.07, 0.05), Vector2(-0.06, 0.05), Vector2(0.05, -0.07), Vector2(-0.07, -0.04), Vector2(0.0, 0.09)]
+	var col: Color = sim.CROPS[3]["col"]
+	for o in offs:
+		var stalk := _cyl_node(stalk_col, 0.012, h, 4)
+		stalk.rotation = Vector3(o.y * 0.6, 0, -o.x * 0.6)
+		stalk.position = Vector3(o.x, h * 0.5, o.y)
+		holder.add_child(stalk)
+		if ripe:
+			var head := _ball_node(col, 0.055, 0.6, 6)
+			head.material_override = _fruit_mat(col, is_gold)
+			head.scale = Vector3(0.7, 1.6, 0.7)
+			head.position = Vector3(o.x, h + 0.05, o.y)
+			holder.add_child(head)
+
+func _crop_squash(holder: Node3D, gs: float, ripe: bool, is_gold: bool) -> void:
+	for k in 5:
+		var ang: float = TAU * float(k) / 5.0
+		var leaf := _ball_node(LEAF_COL if k % 2 == 0 else LEAF_DARK, 0.20 * gs, 0.8)
+		leaf.scale = Vector3(1.3, 0.25, 1.0)
+		leaf.position = Vector3(cos(ang) * 0.18, 0.06, sin(ang) * 0.18)
+		holder.add_child(leaf)
+	if ripe:
+		var col: Color = sim.CROPS[4]["col"]
+		var pump := _ball_node(col, 0.24, 0.45)
+		pump.material_override = _fruit_mat(col, is_gold)
+		pump.scale = Vector3(1.15, 0.8, 1.15)
+		pump.position = Vector3(0.04, 0.18, 0.04)
+		holder.add_child(pump)
+		var stub := _cyl_node(Color(0.40, 0.32, 0.16), 0.02, 0.08)
+		stub.position = Vector3(0.04, 0.34, 0.04)
+		holder.add_child(stub)
+
+func _crop_grapes(holder: Node3D, gs: float, ripe: bool, is_gold: bool) -> void:
+	var h: float = 0.50 * gs
+	var post := _cyl_node(WOOD_COL, 0.02, h)
+	post.position = Vector3(0, h * 0.5, 0)
+	holder.add_child(post)
+	var bar := _cyl_node(WOOD_COL, 0.014, 0.34)
+	bar.rotation = Vector3(0, 0, deg_to_rad(90))
+	bar.position = Vector3(0, h, 0)
+	holder.add_child(bar)
+	for lx in [-0.13, 0.13]:
+		var leaf := _ball_node(LEAF_COL, 0.10 * gs, 0.7)
+		leaf.scale = Vector3(1.2, 0.5, 1.2)
+		leaf.position = Vector3(lx, h, 0)
+		holder.add_child(leaf)
+	if ripe:
+		for cx in [-0.12, 0.12]:
+			_grape_cluster(holder, Vector3(cx, h - 0.06, 0.0), is_gold)
+
+func _grape_cluster(holder: Node3D, top: Vector3, is_gold: bool) -> void:
+	var col: Color = sim.CROPS[5]["col"]
+	var rows := [3, 2, 2, 1]
+	for r in rows.size():
+		var n: int = rows[r]
+		for k in n:
+			var berry := _ball_node(col, 0.038, 0.3, 6)
+			berry.material_override = _fruit_mat(col, is_gold)
+			var bx: float = top.x + (float(k) - float(n - 1) * 0.5) * 0.05
+			berry.position = Vector3(bx, top.y - float(r) * 0.05, top.z)
+			holder.add_child(berry)
+
+func _crop_watermelon(holder: Node3D, gs: float, ripe: bool, is_gold: bool) -> void:
+	for k in 4:
+		var ang: float = TAU * float(k) / 4.0 + 0.6
+		var leaf := _ball_node(LEAF_DARK if k % 2 == 1 else LEAF_COL, 0.13 * gs, 0.8)
+		leaf.scale = Vector3(1.2, 0.22, 0.9)
+		leaf.position = Vector3(cos(ang) * 0.20, 0.05, sin(ang) * 0.20)
+		holder.add_child(leaf)
+	if ripe:
+		var col: Color = sim.CROPS[6]["col"]
+		var melon := _ball_node(col, 0.26, 0.4)
+		melon.material_override = _fruit_mat(col, is_gold)
+		melon.scale = Vector3(1.3, 0.92, 1.0)
+		melon.position = Vector3(0.02, 0.22, 0.02)
+		holder.add_child(melon)
+		var stub := _cyl_node(Color(0.34, 0.30, 0.16), 0.015, 0.06)
+		stub.position = Vector3(0.02, 0.40, -0.18)
+		holder.add_child(stub)
 
 # Homestead band behind the field: farmhouse | windmill | well | depot (left->right),
 # each tappable (well=Su Al, depot=Sat, farmhouse/mill=Magaza). Mirrors the 2D layout.
 func _build_props() -> void:
-	var back_z := _origin().z - 2.1
+	# Everything lives under _homestead so it can slide back in lockstep with the field's
+	# back edge when the plot expands (otherwise the buildings end up inside the field).
+	_homestead = Node3D.new()
+	add_child(_homestead)
+	_props_back_z = _origin().z
+	var back_z := _origin().z - 3.0   # extra gap so the bigger buildings clear the plot
 
 	var farm: PackedScene = load("res://assets/small_farm.glb")
 	var inst: Node3D = farm.instantiate()
-	add_child(inst)
-	_scale_to(inst, 2.3, Vector3(-3.0, 0.0, back_z - 0.2))
-	_register_building(inst, B_FARM, Vector3(-3.0, 0.9, back_z - 0.2), Vector3(2.3, 2.0, 2.3))
+	_homestead.add_child(inst)
+	_scale_to(inst, 4.6, Vector3(-4.6, 0.0, back_z - 0.7))
+	_register_building(inst, B_FARM, Vector3(-4.6, 1.7, back_z - 0.7), Vector3(4.6, 4.0, 4.6))
 
-	_build_windmill(Vector3(-0.7, 0.0, back_z))
-	_build_well(Vector3(1.3, 0.0, back_z))
-	_build_depot(Vector3(3.1, 0.0, back_z))
+	_build_windmill(Vector3(-1.0, 0.0, back_z - 0.2))
+	_build_well(Vector3(1.7, 0.0, back_z))
+	_build_depot(Vector3(4.0, 0.0, back_z))
 
+	_build_scenery(back_z)
+
+# Slide the homestead so it stays the same distance behind the field's back edge as
+# the plot grows. Children were built at the START back edge, so we offset by the delta.
+func _reposition_homestead() -> void:
+	if _homestead != null:
+		_homestead.position.z = _origin().z - _props_back_z
+
+# Fills the green around the field with farm atmosphere: a small tree grove, leafy
+# bushes, hay bales by the depot, and flower patches in the foreground. Trees avoid
+# the farmhouse footprint (back-left) and stay inside the camera frame.
+func _build_scenery(back_z: float) -> void:
+	# trees — right side is open; left-side trees sit forward, beside the field,
+	# clear of the farmhouse (which occupies the back-left).
+	# a fuller tree line wrapping both sides and the back, framing the farm without
+	# crowding the camera. Back-row trees sit behind the homestead band.
 	for t in [Vector3(4.6, 0, back_z + 0.6),
-			Vector3(-4.8, 0, back_z + 0.4)]:
+			Vector3(5.3, 0, back_z + 2.6),
+			Vector3(5.0, 0, back_z + 4.6),
+			Vector3(4.4, 0, back_z + 6.4),
+			Vector3(-4.7, 0, back_z + 3.2),
+			Vector3(-5.3, 0, back_z + 5.2),
+			Vector3(-5.0, 0, back_z + 7.0),
+			Vector3(-2.6, 0, back_z - 1.4),
+			Vector3(0.4, 0, back_z - 1.6),
+			Vector3(2.6, 0, back_z - 1.4),
+			Vector3(6.0, 0, back_z + 3.6),
+			Vector3(-6.0, 0, back_z + 4.4)]:
 		_tree(t)
+
+	# leafy bushes scattered around the plot edges
+	for b in [Vector3(4.3, 0, back_z + 2.6),
+			Vector3(-4.2, 0, back_z + 4.8),
+			Vector3(3.7, 0, back_z - 0.3),
+			Vector3(-3.5, 0, back_z - 0.3),
+			Vector3(5.0, 0, back_z + 1.4),
+			Vector3(-4.6, 0, back_z + 1.6)]:
+		_bush(b)
+
+	# a little stack of hay bales in front of the depot (right side)
+	_hay(Vector3(4.0, 0, back_z + 1.0))
+	_hay(Vector3(4.45, 0, back_z + 1.05))
+	_hay(Vector3(4.22, 0.36, back_z + 1.02))
+
+	# flower patches in the foreground green, just ahead of the field
+	for f in [Vector3(-3.8, 0, back_z + 7.3),
+			Vector3(4.0, 0, back_z + 7.1),
+			Vector3(-2.4, 0, back_z + 7.6),
+			Vector3(2.4, 0, back_z + 7.6)]:
+		_flowers(f)
+
+	# more butterflies drifting over the field and the foreground green for ambient life
+	var fcols := [Color(0.96, 0.78, 0.32), Color(0.92, 0.46, 0.62), Color(0.62, 0.55, 0.92),
+			Color(0.95, 0.55, 0.30), Color(0.55, 0.78, 0.92)]
+	var centers := [Vector3(-1.6, 0.9, back_z + 4.0), Vector3(2.0, 1.1, back_z + 3.0),
+			Vector3(0.3, 0.8, back_z + 5.4), Vector3(-3.2, 0.7, back_z + 6.8),
+			Vector3(3.4, 0.9, back_z + 6.2), Vector3(1.2, 1.0, back_z + 1.6)]
+	for i in range(centers.size()):
+		_butterfly(centers[i], fcols[i % fcols.size()], i)
+
+	# fill the empty green behind the homestead, plus sky clouds, chimney smoke and chickens
+	_build_backyard(back_z)
+	_build_clouds()
+	_build_smoke(Vector3(-5.5, 3.45, back_z - 1.15))
+	_build_chickens(back_z)
+
+# Fills the empty band BEHIND the homestead buildings: a rail fence, a little pond, a
+# vegetable garden, extra trees/bushes and a couple of hay bales — so the back isn't bare.
+# All parented to _homestead so it slides back with the field as the plot grows.
+func _build_backyard(back_z: float) -> void:
+	# a low rail fence running left-to-right behind the buildings
+	_fence(-6.5, 6.0, back_z - 2.0)
+	# a small pond off to the right-back
+	_pond(Vector3(3.3, 0.0, back_z - 3.0))
+	# a vegetable garden behind the farmhouse (back-left)
+	_veg_garden(Vector3(-5.6, 0.0, back_z - 3.0))
+	# extra trees + bushes filling the deep background
+	for t in [Vector3(-3.4, 0, back_z - 3.4),
+			Vector3(-1.2, 0, back_z - 3.8),
+			Vector3(0.9, 0, back_z - 3.6),
+			Vector3(5.6, 0, back_z - 3.8),
+			Vector3(-6.6, 0, back_z - 3.2),
+			Vector3(6.4, 0, back_z - 2.6)]:
+		_tree(t)
+	for b in [Vector3(1.9, 0, back_z - 2.6),
+			Vector3(-2.3, 0, back_z - 2.5),
+			Vector3(4.6, 0, back_z - 3.6)]:
+		_bush(b)
+	# a couple of hay bales tucked behind the depot
+	_hay(Vector3(5.0, 0, back_z - 1.6))
+	_hay(Vector3(5.4, 0, back_z - 1.55))
+
+# A simple rail fence: short posts along the line with two thin rails between them.
+func _fence(x0: float, x1: float, z: float) -> void:
+	var wood := Color(0.50, 0.34, 0.20)
+	var n := int(abs(x1 - x0) / 0.9) + 1
+	for i in range(n):
+		var x: float = lerp(x0, x1, float(i) / float(max(n - 1, 1)))
+		var post := MeshInstance3D.new()
+		var pm := BoxMesh.new(); pm.size = Vector3(0.08, 0.55, 0.08)
+		post.mesh = pm
+		post.material_override = _mat(wood, 1.0)
+		post.position = Vector3(x, 0.27, z)
+		_homestead.add_child(post)
+	# two horizontal rails spanning the run
+	for ry in [0.20, 0.42]:
+		var rail := MeshInstance3D.new()
+		var rm := BoxMesh.new(); rm.size = Vector3(abs(x1 - x0), 0.05, 0.05)
+		rail.mesh = rm
+		rail.material_override = _mat(wood.lightened(0.05), 1.0)
+		rail.position = Vector3((x0 + x1) * 0.5, ry, z)
+		_homestead.add_child(rail)
+
+# A little pond: a flat blue water disc set in a ring of small stones.
+func _pond(at: Vector3) -> void:
+	var water := MeshInstance3D.new()
+	var wm := CylinderMesh.new()
+	wm.top_radius = 0.95; wm.bottom_radius = 0.95; wm.height = 0.04; wm.radial_segments = 18
+	water.mesh = wm
+	var wmat := _mat(sim.C_WATER, 0.15, 0.0)
+	wmat.emission_enabled = true
+	wmat.emission = sim.C_WATER.darkened(0.25)
+	wmat.emission_energy_multiplier = 0.4
+	water.material_override = wmat
+	water.position = at + Vector3(0, 0.03, 0)
+	_homestead.add_child(water)
+	# a ring of stones around the rim
+	for k in range(10):
+		var a: float = TAU * float(k) / 10.0
+		var stone := _ball_node(Color(0.55, 0.54, 0.50), 0.12, 0.9)
+		stone.scale = Vector3(1.2, 0.6, 1.2)
+		stone.position = at + Vector3(cos(a) * 1.0, 0.05, sin(a) * 1.0)
+		_homestead.add_child(stone)
+
+# A vegetable garden: a small raised earth bed with a few rows of little cabbages.
+func _veg_garden(at: Vector3) -> void:
+	var bed := MeshInstance3D.new()
+	var bm := BoxMesh.new(); bm.size = Vector3(1.8, 0.12, 1.3)
+	bed.mesh = bm
+	bed.material_override = _mat(Color(0.30, 0.21, 0.13), 0.9)
+	bed.position = at + Vector3(0, 0.06, 0)
+	_homestead.add_child(bed)
+	for gx in range(3):
+		for gz in range(3):
+			var cab := _ball_node(Color(0.34, 0.55, 0.30), 0.13, 0.85)
+			cab.scale = Vector3(1.0, 0.8, 1.0)
+			cab.position = at + Vector3(-0.55 + gx * 0.55, 0.18, -0.40 + gz * 0.42)
+			_homestead.add_child(cab)
+
+# A handful of soft low-poly clouds drifting slowly across the sky (parented to the
+# scene, not the homestead — the sky stays put as the field grows).
+func _build_clouds() -> void:
+	var defs := [Vector3(-9.0, 9.5, -5.0), Vector3(-2.0, 10.5, -7.0),
+			Vector3(5.0, 9.0, -4.0), Vector3(10.0, 11.0, -8.0)]
+	for i in range(defs.size()):
+		var root := Node3D.new()
+		add_child(root)
+		root.position = defs[i]
+		var s: float = 1.0 + (i % 3) * 0.25
+		root.scale = Vector3.ONE * s
+		# each cloud is a cluster of overlapping flattened white balls
+		for off in [Vector3(0, 0, 0), Vector3(0.9, -0.1, 0.2), Vector3(-0.9, -0.05, -0.2),
+				Vector3(0.4, 0.25, -0.3), Vector3(-0.4, 0.2, 0.3)]:
+			var puff := _ball_node(Color(0.97, 0.98, 1.0), 0.7, 1.0)
+			puff.scale = Vector3(1.3, 0.7, 1.0)
+			puff.position = off
+			root.add_child(puff)
+		_clouds.append({"node": root, "speed": 0.25 + 0.12 * float(i % 3)})
+
+# Chimney smoke: a short column of soft puffs that rise, swell and fade, then loop.
+# Parented to _homestead so it tracks the farmhouse as the field grows.
+func _build_smoke(at: Vector3) -> void:
+	_smoke_base = at
+	for k in range(6):
+		var puff := _ball_node(Color(0.85, 0.85, 0.88), 0.13, 1.0)
+		var mat := puff.material_override as StandardMaterial3D
+		mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		puff.position = at
+		_homestead.add_child(puff)
+		_smoke.append({"node": puff, "mat": mat, "phase": float(k) / 6.0})
+
+# A handful of chickens that wander in lazy loops around the farmyard, bobbing as they go.
+func _build_chickens(back_z: float) -> void:
+	var spots := [Vector3(-3.0, 0.0, back_z + 0.4), Vector3(2.6, 0.0, back_z - 0.6),
+			Vector3(0.2, 0.0, back_z + 1.2)]
+	var tints := [Color(0.96, 0.95, 0.92), Color(0.86, 0.74, 0.58), Color(0.96, 0.95, 0.92)]
+	for i in range(spots.size()):
+		var node := _chicken(tints[i % tints.size()])
+		node.position = spots[i]
+		_critters.append({"node": node, "center": spots[i], "phase": float(i) * 2.3,
+				"speed": 0.5 + 0.15 * i, "radius": 0.7 + 0.2 * i})
+
+# A small low-poly chicken: plump body, head with comb + beak, perky tail and two legs.
+func _chicken(tint: Color) -> Node3D:
+	var root := Node3D.new()
+	_homestead.add_child(root)
+	var body := _ball_node(tint, 0.16, 0.85)
+	body.scale = Vector3(1.1, 0.95, 1.35)
+	body.position = Vector3(0, 0.18, 0)
+	root.add_child(body)
+	var head := _ball_node(tint, 0.10, 0.85)
+	head.position = Vector3(0, 0.30, 0.16)
+	root.add_child(head)
+	var comb := _cone_node(Color(0.86, 0.24, 0.20), 0.05, 0.08, 5)
+	comb.position = Vector3(0, 0.40, 0.16)
+	root.add_child(comb)
+	var beak := _cone_node(Color(0.92, 0.66, 0.18), 0.035, 0.08, 5)
+	beak.rotation_degrees = Vector3(90, 0, 0)
+	beak.position = Vector3(0, 0.30, 0.27)
+	root.add_child(beak)
+	var tail := _cone_node(tint.darkened(0.1), 0.09, 0.16, 5)
+	tail.rotation_degrees = Vector3(-55, 0, 0)
+	tail.position = Vector3(0, 0.26, -0.18)
+	root.add_child(tail)
+	for sx in [-0.06, 0.06]:
+		var leg := _cyl_node(Color(0.92, 0.66, 0.18), 0.012, 0.12)
+		leg.position = Vector3(sx, 0.06, 0.0)
+		root.add_child(leg)
+	return root
+
+# A butterfly: tiny body with two coloured wing quads, registered for flutter + drift.
+func _butterfly(center: Vector3, col: Color, i: int) -> void:
+	var root := Node3D.new()
+	add_child(root)
+	root.position = center
+	var body := _cyl_node(Color(0.18, 0.16, 0.18), 0.018, 0.12)
+	root.add_child(body)
+	var wings: Array = []
+	for s in [-1.0, 1.0]:
+		var hinge := Node3D.new()
+		root.add_child(hinge)
+		var w := MeshInstance3D.new()
+		var wm := BoxMesh.new(); wm.size = Vector3(0.16, 0.01, 0.11)
+		w.mesh = wm
+		var wmat := _mat(col, 0.5)
+		wmat.emission_enabled = true; wmat.emission = col; wmat.emission_energy_multiplier = 0.4
+		w.material_override = wmat
+		w.position = Vector3(s * 0.09, 0.0, 0.0)
+		hinge.add_child(w)
+		wings.append(hinge)
+	_butterflies.append({"node": root, "center": center, "phase": float(i) * 2.1, "wings": wings})
+
+# A rounded shrub: a small cluster of overlapping green balls.
+func _bush(at: Vector3) -> void:
+	var root := Node3D.new()
+	_homestead.add_child(root)
+	root.position = at
+	var greens := [Color(0.26, 0.46, 0.24), Color(0.30, 0.52, 0.27), Color(0.23, 0.42, 0.22)]
+	var offs := [Vector3(0, 0.18, 0), Vector3(0.16, 0.12, 0.05), Vector3(-0.15, 0.13, -0.04), Vector3(0.02, 0.10, 0.16)]
+	for i in range(offs.size()):
+		var ball := _ball_node(greens[i % greens.size()], 0.20 - i * 0.015, 0.9)
+		ball.scale = Vector3(1.1, 0.85, 1.1)
+		ball.position = offs[i]
+		root.add_child(ball)
+	# bushes sway a touch more than trees and faster (lighter foliage)
+	_sway.append({"node": root, "phase": at.z * 2.1 + at.x, "amp": 0.05})
+
+# A hay bale: a short straw-coloured cylinder lying on its side with darker end caps.
+func _hay(at: Vector3) -> void:
+	var bale := MeshInstance3D.new()
+	var bm := CylinderMesh.new()
+	bm.top_radius = 0.18; bm.bottom_radius = 0.18; bm.height = 0.42; bm.radial_segments = 14
+	bale.mesh = bm
+	bale.material_override = _mat(Color(0.82, 0.69, 0.32), 1.0)
+	bale.rotation_degrees = Vector3(0, 0, 90)
+	bale.position = at + Vector3(0, 0.18, 0)
+	_homestead.add_child(bale)
+
+# A flower patch: a few tiny coloured blossoms on short green stems.
+func _flowers(at: Vector3) -> void:
+	var cols := [Color(0.95, 0.85, 0.30), Color(0.90, 0.45, 0.55), Color(0.70, 0.55, 0.90), Color(0.95, 0.95, 0.95)]
+	var spots := [Vector3(0, 0, 0), Vector3(0.22, 0, 0.10), Vector3(-0.18, 0, 0.14), Vector3(0.05, 0, -0.18), Vector3(-0.10, 0, -0.08)]
+	for i in range(spots.size()):
+		var stem := _cyl_node(Color(0.30, 0.48, 0.24), 0.012, 0.16)
+		stem.position = at + spots[i] + Vector3(0, 0.08, 0)
+		_homestead.add_child(stem)
+		var blossom := _ball_node(cols[i % cols.size()], 0.045, 0.7)
+		blossom.position = at + spots[i] + Vector3(0, 0.18, 0)
+		_homestead.add_child(blossom)
 
 # Procedural windmill (= Degirmen): stone tower + spinning-look blades.
 func _build_windmill(at: Vector3) -> void:
 	var root := Node3D.new()
-	add_child(root)
+	_homestead.add_child(root)
 	root.position = at
+	root.scale = Vector3.ONE * 1.5   # bigger, more realistic against the field
 	var tower := MeshInstance3D.new()
 	var tm := CylinderMesh.new()
 	tm.top_radius = 0.34
@@ -869,10 +1585,11 @@ func _build_windmill(at: Vector3) -> void:
 	roof.material_override = _mat(Color(0.55, 0.30, 0.22), 0.9)
 	roof.position = Vector3(0, 1.7, 0)
 	root.add_child(roof)
-	# blades (a + cross of flat boxes on the front face)
+	# blades (a + cross of flat boxes on the front face) — spun by _sync_ambient
 	var hub := Node3D.new()
 	hub.position = Vector3(0, 1.3, 0.5)
 	root.add_child(hub)
+	_windmill_hub = hub
 	for a in range(4):
 		var blade := MeshInstance3D.new()
 		var bm := BoxMesh.new()
@@ -884,13 +1601,14 @@ func _build_windmill(at: Vector3) -> void:
 		blade.position = Vector3(sin(deg_to_rad(a * 90.0)) * 0.4, cos(deg_to_rad(a * 90.0)) * 0.4, 0)
 		blade.rotation_degrees = Vector3(0, 0, a * 90.0)
 		hub.add_child(blade)
-	_register_building(root, B_MILL, at + Vector3(0, 0.9, 0), Vector3(1.1, 2.0, 1.1))
+	_register_building(root, B_MILL, at + Vector3(0, 1.35, 0), Vector3(1.65, 3.0, 1.65))
 
 # Procedural well (= Su Kuyusu): stone ring + water + roof on posts.
 func _build_well(at: Vector3) -> void:
 	var root := Node3D.new()
-	add_child(root)
+	_homestead.add_child(root)
 	root.position = at
+	root.scale = Vector3.ONE * 1.4
 	var ring := MeshInstance3D.new()
 	var cm := CylinderMesh.new()
 	cm.top_radius = 0.42
@@ -936,13 +1654,14 @@ func _build_well(at: Vector3) -> void:
 	roof.position = Vector3(0, 1.5, 0)
 	roof.rotation_degrees = Vector3(0, 45, 0)
 	root.add_child(roof)
-	_register_building(root, B_WELL, at + Vector3(0, 0.6, 0), Vector3(1.0, 1.6, 1.0))
+	_register_building(root, B_WELL, at + Vector3(0, 0.84, 0), Vector3(1.4, 2.24, 1.4))
 
 # Procedural depot (= Depo): barn-like crate with a lid.
 func _build_depot(at: Vector3) -> void:
 	var root := Node3D.new()
-	add_child(root)
+	_homestead.add_child(root)
 	root.position = at
+	root.scale = Vector3.ONE * 1.5
 	var body := MeshInstance3D.new()
 	var bm := BoxMesh.new()
 	bm.size = Vector3(0.9, 0.8, 0.8)
@@ -966,13 +1685,13 @@ func _build_depot(at: Vector3) -> void:
 		strap.material_override = _mat(Color(0.35, 0.24, 0.15), 0.9)
 		strap.position = Vector3(sx, 0.4, 0)
 		root.add_child(strap)
-	_register_building(root, B_DEPOT, at + Vector3(0, 0.5, 0), Vector3(1.0, 1.0, 0.9))
+	_register_building(root, B_DEPOT, at + Vector3(0, 0.75, 0), Vector3(1.5, 1.5, 1.35))
 
 # Give a building a physics body so taps can hit it (raycast in _tap).
 func _register_building(node: Node3D, kind: String, center: Vector3, size: Vector3) -> void:
 	var body := StaticBody3D.new()
 	body.position = center
-	add_child(body)
+	_homestead.add_child(body)
 	var shape := CollisionShape3D.new()
 	var box := BoxShape3D.new()
 	box.size = size
@@ -1041,6 +1760,9 @@ func _build_environment() -> void:
 
 # ---------------------------------------------------------------- helpers
 func _tree(at: Vector3) -> void:
+	var root := Node3D.new()
+	_homestead.add_child(root)
+	root.position = at
 	var trunk := MeshInstance3D.new()
 	var tm := CylinderMesh.new()
 	tm.top_radius = 0.10
@@ -1048,8 +1770,8 @@ func _tree(at: Vector3) -> void:
 	tm.height = 0.7
 	trunk.mesh = tm
 	trunk.material_override = _mat(Color(0.42, 0.28, 0.17), 1.0)
-	trunk.position = at + Vector3(0, 0.35, 0)
-	add_child(trunk)
+	trunk.position = Vector3(0, 0.35, 0)
+	root.add_child(trunk)
 	var greens := [Color(0.24, 0.44, 0.22), Color(0.28, 0.50, 0.25), Color(0.33, 0.56, 0.29)]
 	for i in range(3):
 		var cone := MeshInstance3D.new()
@@ -1060,21 +1782,25 @@ func _tree(at: Vector3) -> void:
 		cm.radial_segments = 7
 		cone.mesh = cm
 		cone.material_override = _mat(greens[i], 1.0)
-		cone.position = at + Vector3(0, 0.75 + i * 0.34, 0)
-		add_child(cone)
+		cone.position = Vector3(0, 0.75 + i * 0.34, 0)
+		root.add_child(cone)
+	# register for a gentle breeze sway (phase varies by x so they don't move in lockstep)
+	_sway.append({"node": root, "phase": at.x * 1.7 + at.z, "amp": 0.035})
 
+# Soil darkens as it gets worked and watered: dry sandy loam when empty, rich damp
+# earth once tilled/planted. Kept subtle on purpose — a small quality bump, not a restyle.
 func _soil_color(s: int) -> Color:
 	match s:
 		SimState.EMPTY:
-			return Color(0.50, 0.37, 0.23)
+			return Color(0.52, 0.39, 0.25)   # dry, lighter sandy loam
 		SimState.OBSTACLE:
-			return Color(0.46, 0.34, 0.21)
+			return Color(0.47, 0.35, 0.22)
 		SimState.TILLED:
-			return Color(0.36, 0.26, 0.16)
+			return Color(0.33, 0.23, 0.14)   # freshly turned, damp
 		SimState.PLANTED:
-			return Color(0.41, 0.30, 0.18)
+			return Color(0.37, 0.27, 0.16)
 		_:
-			return Color(0.34, 0.25, 0.15)
+			return Color(0.30, 0.22, 0.13)   # growing/ripe — richest, well-watered earth
 
 # Scale a glb instance so its largest footprint == target, optionally reposition to sit on ground.
 func _scale_to(inst: Node3D, target: float, at = null) -> void:
@@ -1217,8 +1943,12 @@ func _setup_bot_demo() -> void:
 	for i in range(sim.states.size()):
 		harv.zone[i] = true
 		clean.zone[i] = true
+	# mirror the union into the shared work area so the zone view renders it
+	for bot in sim.bots:
+		for k in bot.zone:
+			_shared_zone[k] = true
 	_tool = 0
-	_hud.refresh_tools(sim, _tool, _erase)
+	_hud.refresh_tools(sim, _tool)
 	_update_zone_view()
 	# advance the sim a bit so bots are already out on the field for the shot
 	for _k in range(120):

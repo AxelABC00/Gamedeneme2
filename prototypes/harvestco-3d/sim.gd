@@ -86,7 +86,9 @@ const BOT_SPEED := 160.0     # base px/s (legacy 2D view tuning; unused in 3D)
 const BOT_SPEED_TILES := 2.4 # base movement speed in grid tiles/sec (sim-space)
 const BOT_ARRIVE := 0.06     # grid distance at which a bot starts working its target
 const WORK_TIME := 0.25
-const MAINT_DECAY := 1.0 / 320.0
+const MAINT_DECAY := 1.0 / 900.0   # ~15 min to fully wear; worn bots slow down, never hard-stop
+const COND_FLOOR := 0.30           # condition never drops below this, so bots always keep working
+const COND_SPEED_MIN := 0.5        # slowest a fully-worn bot moves/works (fraction of normal)
 const MILL_RATE := 0.5      # wheat->flour per second per windmill level
 const WELL_RATE := 0.6      # water per second per well level
 const SCARECROW_MAX := 5
@@ -153,6 +155,7 @@ class Bot:
 	var age: float = 0.0
 	var condition: float = 1.0
 	var gpos: Vector2 = Vector2.ZERO
+	var home: Vector2 = Vector2.ZERO  # parking spot at the front edge when idle
 var bots: Array = []
 var claimed: Array = []          # per-tile: a bot has reserved this tile (no double-targeting)
 
@@ -283,6 +286,12 @@ func _trigger_event() -> void:
 		0:
 			water = min(water + RAIN_WATER, WATER_MAX)
 			rain_t = RAIN_DUR
+			# rain waters every planted tile for free (PLANTED -> GROWING), so it
+			# visibly "wets the soil" and pushes the whole field along at once.
+			for i in range(states.size()):
+				if states[i] == PLANTED:
+					states[i] = GROWING
+					grow[i] = 0.0
 			_emit_event("Yagmur yagiyor! Topraklar suluyor.")
 		1:
 			ufo_active = true
@@ -346,19 +355,27 @@ func tick_bots(delta: float) -> bool:
 	var changed := false
 	var wr := wear_rate()
 	var spd := bot_speed_tiles()
-	for bot in bots:
+	for i in range(bots.size()):
+		var bot: Bot = bots[i]
 		bot.age += delta
-		bot.condition = max(bot.condition - wr * delta, 0.0)
-		if bot.condition <= 0.0 or not _can_do(bot):
+		# Worn bots slow down but never fully stop (floor) — so they never just freeze.
+		bot.condition = max(bot.condition - wr * delta, COND_FLOOR)
+		var cond_f: float = lerp(COND_SPEED_MIN, 1.0, inverse_lerp(COND_FLOOR, 1.0, bot.condition))
+		var bspd: float = spd * cond_f
+		# Can't do this task right now (no water / no coins) — head home and wait.
+		if not _can_do(bot):
 			_release(bot)
 			bot.target = -1
 			bot.state = "moving"
+			_go_home(bot, i, bspd, delta)
 			continue
 		if bot.state == "moving":
 			if bot.target == -1 or not (bot.target in bot.zone) or not needs(bot.task, states[bot.target]):
 				_release(bot)
 				_pick_target(bot)
 			if bot.target == -1:
+				# nothing to do — walk to the parking spot instead of blocking the field
+				_go_home(bot, i, bspd, delta)
 				continue
 			var tp := _grid_center(bot.target)
 			var to_t: Vector2 = tp - bot.gpos
@@ -366,9 +383,9 @@ func tick_bots(delta: float) -> bool:
 			if d <= BOT_ARRIVE:
 				bot.gpos = tp
 				bot.state = "working"
-				bot.work = WORK_TIME
+				bot.work = WORK_TIME / cond_f   # worn bots also work a little slower
 			else:
-				bot.gpos += to_t.normalized() * min(spd * delta, d)
+				bot.gpos += to_t.normalized() * min(bspd * delta, d)
 		elif bot.state == "working":
 			bot.work -= delta
 			if bot.work <= 0.0:
@@ -378,29 +395,49 @@ func tick_bots(delta: float) -> bool:
 				bot.target = -1
 				bot.state = "moving"
 
-	# Keep non-working bots from stacking: gently push overlapping bots apart.
-	var min_gap := 0.55
-	for a in range(bots.size()):
-		for b in range(a + 1, bots.size()):
-			var ba: Bot = bots[a]
-			var bb: Bot = bots[b]
-			if ba.state == "working" and bb.state == "working":
-				continue
-			var dv: Vector2 = bb.gpos - ba.gpos
-			var dd: float = dv.length()
-			if dd >= min_gap:
-				continue
-			var dir: Vector2 = dv.normalized() if dd > 0.01 else Vector2(cos(float(a + b)), sin(float(a + b)))
-			var push: Vector2 = dir * (min_gap - dd) * 0.5
-			if ba.state != "working":
-				ba.gpos -= push
-			if bb.state != "working":
-				bb.gpos += push
+	# Keep bots from stacking/blocking each other. Two passes so chains of bots
+	# resolve in one tick instead of jittering apart over several frames. A working
+	# bot is anchored on its tile (moving it would break harvesting), so when a mover
+	# meets a worker the mover takes the FULL push around it.
+	var min_gap := 0.62
+	for _pass in range(2):
+		for a in range(bots.size()):
+			for b in range(a + 1, bots.size()):
+				var ba: Bot = bots[a]
+				var bb: Bot = bots[b]
+				if ba.state == "working" and bb.state == "working":
+					continue
+				var dv: Vector2 = bb.gpos - ba.gpos
+				var dd: float = dv.length()
+				if dd >= min_gap:
+					continue
+				var dir: Vector2 = dv.normalized() if dd > 0.01 else Vector2(cos(float(a + b)), sin(float(a + b)))
+				var overlap: float = min_gap - dd
+				var a_movable: bool = ba.state != "working"
+				var b_movable: bool = bb.state != "working"
+				if a_movable and b_movable:
+					var half: Vector2 = dir * overlap * 0.5
+					ba.gpos -= half
+					bb.gpos += half
+				elif a_movable:
+					ba.gpos -= dir * overlap
+				elif b_movable:
+					bb.gpos += dir * overlap
 	return changed
 
 # Grid-space center of a tile (col, row).
 func _grid_center(i: int) -> Vector2:
 	return Vector2(float(i % COLS), float(i / COLS))
+
+# Idle bots walk to a parking spot just in front of the field, spread across the
+# width by index, so they never stand in the working area blocking other bots.
+func _go_home(bot: Bot, i: int, spd: float, delta: float) -> void:
+	var home_x: float = fposmod(float(i) * 1.6 + 0.6, float(COLS))
+	var home := Vector2(home_x, float(rows) + 0.7)
+	var to_h: Vector2 = home - bot.gpos
+	var d: float = to_h.length()
+	if d > 0.05:
+		bot.gpos += to_h.normalized() * min(spd * delta, d)
 
 func _pick_target(bot: Bot) -> void:
 	var best := -1
@@ -447,7 +484,7 @@ func _can_do(bot: Bot) -> bool:
 		WATER:
 			return water > 0
 		PLANT:
-			return coins >= int(CROPS[bot.seed]["seed"])
+			return coins >= int(CROPS[selected_seed]["seed"])
 	return true
 
 # Applies a bot's task to its target tile. Returns true if the tile changed.
@@ -460,12 +497,14 @@ func _apply_task(bot: Bot) -> bool:
 			states[i] = TILLED
 			return true
 		PLANT:
-			var sc: int = CROPS[bot.seed]["seed"]
+			# plant whatever crop the player currently has selected, so changing the
+			# crop in the HUD changes what the planting bots sow.
+			var sc: int = CROPS[selected_seed]["seed"]
 			if coins < sc:
 				return false
 			coins -= sc
 			states[i] = PLANTED
-			crop_type[i] = bot.seed
+			crop_type[i] = selected_seed
 			return true
 		WATER:
 			if water <= 0:
@@ -594,9 +633,10 @@ func sell_all() -> int:
 	coins += earned
 	return earned
 
-# Buy one water bundle. Returns true if affordable.
+# Buy one water bundle. Returns true if affordable AND the tank isn't already full
+# (don't charge coins for water that would overflow the cap).
 func buy_water() -> bool:
-	if coins < WATER_COST:
+	if coins < WATER_COST or water >= WATER_MAX:
 		return false
 	coins -= WATER_COST
 	water = min(water + WATER_BUNDLE, WATER_MAX)
