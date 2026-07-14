@@ -1,0 +1,45 @@
+; TEMPLATE — copy to `export_presets.cfg` and fill keystore/release_password.
+; The real export_presets.cfg is gitignored because it contains the signing password.
+; See RELEASE.md for the full build steps.
+[preset.0]
+
+name="Android"
+platform="Android"
+runnable=true
+advanced_options=true
+dedicated_server=false
+custom_features=""
+export_filter="all_resources"
+include_filter=""
+exclude_filter="_*.gd, test_*.gd, *.keystore, keystore-info.txt, RELEASE.md"
+export_path="build/durdanin-tarlalari.apk"
+patches=PackedStringArray()
+encryption_include_filters=""
+encryption_exclude_filters=""
+encrypt_pck=false
+encrypt_directory=false
+script_export_mode=2
+
+[preset.0.options]
+
+custom_template/debug=""
+custom_template/release=""
+gradle_build/use_gradle_build=false
+architectures/armeabi-v7a=true
+architectures/arm64-v8a=true
+architectures/x86=false
+architectures/x86_64=false
+version/code=1
+version/name="1.0.0"
+package/unique_name="com.cetinkaya.durdanintarlalari"
+package/name="Durdanın Tarlaları"
+package/signed=true
+package/app_category=2
+launcher_icons/main_192x192="res://icon.png"
+launcher_icons/adaptive_foreground_432x432="res://icon.png"
+launcher_icons/adaptive_background_432x432="res://icon.png"
+screen/immersive_mode=true
+permissions/internet=false
+keystore/release="durdanin-release.keystore"
+keystore/release_user="durdanin"
+keystore/release_password=""

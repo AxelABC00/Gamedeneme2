@@ -1,0 +1,24 @@
+# Release signing — NEVER commit (private key + passwords)
+*.keystore
+keystore-info.txt
+
+# Local export config (holds the keystore path + signing password)
+export_presets.cfg
+
+# Build output
+/build/
+/export/
+*.apk
+*.aab
+
+# Godot editor import cache
+/.godot/
+
+# Transient screenshot/test artifacts from the env-gated hooks
+_menu_shot.png
+_play_shot.png
+_store_bld.png
+_store_crop.png
+_prestige_shot.png
+_season_shot.png
+_expand_shot.png
