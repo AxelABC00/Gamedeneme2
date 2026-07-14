@@ -224,3 +224,27 @@ maliyet üstel, gelir daha yavaş; hard caps and the missing prestige loop were 
 - Verified: `test_meta.gd` extended (growth mult, market income, compost bonus, crop/building tabs,
   info-only crop rows, unlock announce, save round-trip) **PASS**; `STORE_SHOT` screenshots of the
   Binalar + Urunler tabs and `PLAY_SHOT` (3 new buildings in the scene) confirmed on-screen.
+
+## Duration pass — measured playtime, then extended it ✓
+A headless autoplayer (`_autoplay.gd`: manual-tap bootstrap → greedy bot-driven reinvestment, seeded)
+was written to **measure** how long the content actually lasts. First run exposed the real problem:
+income scales far faster than any gate, so an aggressive player exhausted *everything* — last crop,
+maxed field, 10 prestige stars — in **under 5 minutes**, then just watched coins climb (8M at 2h).
+Retuned against the sim (same autoplayer, aggressive 30-bot lower bound):
+
+| Content | Before | After |
+|---|---|---|
+| Ayçiçeği unlock | 2m54s | 11m |
+| Altın Elma (was final crop) | 4m47s | 36m |
+| Mantar (new) | — | 1h48m |
+| Ejder Meyvesi (new final) | — | ~4–5h |
+| 10 prestige stars | 2m | 32m |
+| 25 prestige stars | 300 stars in 2h (!) | 1h49m |
+
+Changes: **+2 endgame crops** (Mantar, Ejder Meyvesi), `CROP_UNLOCK` thresholds spread far wider
+(top crop 600→45000 lifetime harvests), prestige reworked (`STAR_DIVISOR` 100→15000, `STAR_BONUS`
+0.15→0.10 — stars are now a slow, meaningful curve instead of runaway), steeper field expansion, and
+a longer 23-step milestone ladder aligned to the new thresholds. Casual play (fewer/less-optimal
+bots) runs meaningfully longer than the aggressive numbers above — the last crop/deep prestige are
+multi-day goals. Also fixed a save round-trip gap (fractional `coin_acc`/`water_acc`/`mill_acc` were
+dropped on every save). `test_sim` 70/70 + `test_meta` PASS after the retune.

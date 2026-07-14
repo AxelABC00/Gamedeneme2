@@ -84,10 +84,13 @@ const CROPS := [
 	{"name": "Misir", "grow": 16.0, "value": 65, "seed": 16, "col": Color("#F2C230")},
 	{"name": "Aycicegi", "grow": 20.0, "value": 110, "seed": 28, "col": Color("#E8A317")},
 	{"name": "Altin Elma", "grow": 26.0, "value": 200, "seed": 55, "col": Color("#F4C542")},
+	{"name": "Mantar", "grow": 32.0, "value": 340, "seed": 90, "col": Color("#C98A6A")},
+	{"name": "Ejder Meyvesi", "grow": 40.0, "value": 560, "seed": 150, "col": Color("#D14E8C")},
 ]
 # crops unlock as lifetime `harvested` climbs — discovery + a reason to keep harvesting.
-# first 7 are open from the start (matches the original build); premium tiers gate in.
-const CROP_UNLOCK := [0, 0, 0, 0, 0, 0, 0, 40, 120, 280, 600]
+# first 7 are open from the start; premium tiers gate in over a real session (thresholds
+# tuned against the autoplay sim so the last crop is a multi-hour goal, not a 5-min one).
+const CROP_UNLOCK := [0, 0, 0, 0, 0, 0, 0, 60, 400, 1800, 6000, 18000, 45000]
 
 # --- economy constants (ported) ---
 const WHEAT := 3            # CROPS index of Bugday (sold as flour when a mill exists)
@@ -103,8 +106,8 @@ const START_STORAGE := 20
 # You reset the farm but keep permanent Stars, which give a global sell multiplier.
 # Crop unlocks (lifetime `harvested`) and Stars persist across seasons — a cozy, soft
 # prestige: you rebuild faster each season instead of losing everything.
-const STAR_DIVISOR := 100.0        # stars gained = floor(sqrt(season_earned / DIVISOR))
-const STAR_BONUS := 0.15           # +15% global sell value per Star
+const STAR_DIVISOR := 15000.0      # stars gained = floor(sqrt(season_earned / DIVISOR))
+const STAR_BONUS := 0.10           # +10% global sell value per Star
 
 # --- milestones / "Gorevler" — always-visible next goal with a reward (retention) ---
 # metric keys: harvested | bots | rows | stars | upgrades | season_earned
@@ -116,15 +119,22 @@ const MILESTONES := [
 	{"desc": "Bir yukseltme al", "metric": "upgrades", "target": 1, "reward": 40},
 	{"desc": "25 urun hasat et", "metric": "harvested", "target": 25, "reward": 55},
 	{"desc": "3 robota ulas", "metric": "bots", "target": 3, "reward": 70},
-	{"desc": "Cilek ac (40 hasat)", "metric": "harvested", "target": 40, "reward": 60},
-	{"desc": "100 urun hasat et", "metric": "harvested", "target": 100, "reward": 150},
-	{"desc": "Misir ac (120 hasat)", "metric": "harvested", "target": 120, "reward": 130},
-	{"desc": "Ilk Yeni Sezon (prestij)", "metric": "stars", "target": 1, "reward": 200},
-	{"desc": "6 robota ulas", "metric": "bots", "target": 6, "reward": 180},
-	{"desc": "Aycicegi ac (280 hasat)", "metric": "harvested", "target": 280, "reward": 260},
-	{"desc": "Tarlayi 12 siraya getir", "metric": "rows", "target": 12, "reward": 300},
-	{"desc": "3 Yildiza ulas", "metric": "stars", "target": 3, "reward": 400},
-	{"desc": "Altin Elma ac (600 hasat)", "metric": "harvested", "target": 600, "reward": 500},
+	{"desc": "Cilek ac (60 hasat)", "metric": "harvested", "target": 60, "reward": 90},
+	{"desc": "150 urun hasat et", "metric": "harvested", "target": 150, "reward": 150},
+	{"desc": "Ilk Yeni Sezon (prestij)", "metric": "stars", "target": 1, "reward": 250},
+	{"desc": "Misir ac (400 hasat)", "metric": "harvested", "target": 400, "reward": 300},
+	{"desc": "6 robota ulas", "metric": "bots", "target": 6, "reward": 220},
+	{"desc": "Tarlayi 12 siraya getir", "metric": "rows", "target": 12, "reward": 350},
+	{"desc": "5 Yildiza ulas", "metric": "stars", "target": 5, "reward": 600},
+	{"desc": "Aycicegi ac (1800 hasat)", "metric": "harvested", "target": 1800, "reward": 900},
+	{"desc": "Tarlayi maks yap (20 sira)", "metric": "rows", "target": 20, "reward": 800},
+	{"desc": "10 robota ulas", "metric": "bots", "target": 10, "reward": 700},
+	{"desc": "Altin Elma ac (6000 hasat)", "metric": "harvested", "target": 6000, "reward": 2500},
+	{"desc": "10 Yildiza ulas", "metric": "stars", "target": 10, "reward": 3000},
+	{"desc": "Mantar ac (18000 hasat)", "metric": "harvested", "target": 18000, "reward": 6000},
+	{"desc": "20 robota ulas", "metric": "bots", "target": 20, "reward": 4000},
+	{"desc": "Ejder Meyvesi ac (45000 hasat)", "metric": "harvested", "target": 45000, "reward": 15000},
+	{"desc": "25 Yildiza ulas", "metric": "stars", "target": 25, "reward": 20000},
 ]
 
 # --- bots / buildings / events constants (ported) ---
@@ -304,6 +314,7 @@ func to_dict() -> Dictionary:
 		"season_earned": season_earned,
 		"milestone_idx": milestone_idx,
 		"unlocked_seen": unlocked_seen,
+		"water_acc": water_acc, "mill_acc": mill_acc, "coin_acc": coin_acc,
 		"bots": bot_list,
 	}
 
@@ -341,6 +352,9 @@ func from_dict(d: Dictionary) -> void:
 	season_earned = int(d.get("season_earned", 0))
 	milestone_idx = int(d.get("milestone_idx", 0))
 	unlocked_seen = int(d.get("unlocked_seen", 7))
+	water_acc = float(d.get("water_acc", 0.0))
+	mill_acc = float(d.get("mill_acc", 0.0))
+	coin_acc = float(d.get("coin_acc", 0.0))
 	event_timer = float(d.get("event_timer", randf_range(EVENT_MIN, EVENT_MAX)))
 	rain_t = 0.0; ufo_active = false; birds_active = false; sell_boost_t = 0.0
 	bots.clear()
@@ -1154,7 +1168,7 @@ func can_expand() -> bool:
 	return rows < MAX_ROWS
 
 func expand_cost() -> int:
-	return int(round(15.0 * pow(1.5, float(rows - START_ROWS))))
+	return int(round(22.0 * pow(1.6, float(rows - START_ROWS))))
 
 # Adds one new row of tiles (some obstacles). Returns the new row index or -1.
 func buy_expand() -> int:
