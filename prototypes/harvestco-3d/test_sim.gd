@@ -110,12 +110,12 @@ func _initialize() -> void:
 
 	# 9. sell_all sums stock*value + flour*FLOUR_VALUE, clears, pays coins
 	s = _fresh()
-	s.stock[2] = 2          # 2 Domates @ 8 = 16
+	s.stock[2] = 2          # 2 Domates @ 12 = 24
 	s.flour = 1             # 1 flour @ 10 = 10
 	before = s.coins
 	var earned: int = s.sell_all()
-	_ok("sell_all returns earned", earned == 26)
-	_ok("sell_all adds coins", s.coins == before + 26)
+	_ok("sell_all returns earned", earned == 34)
+	_ok("sell_all adds coins", s.coins == before + 34)
 	_ok("sell_all clears stock", s.stock_total() == 0 and s.flour == 0)
 
 	# 10. buy_water deducts cost, caps water; blocked when poor

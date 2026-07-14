@@ -79,7 +79,26 @@ func _ready() -> void:
 	_menu = (load("res://menu.gd") as GDScript).new()
 	add_child(_menu)
 	_menu.setup(self, _settings)
-	_menu.show_main(_save.has_save())
+	# Just prestiged? Skip the menu and drop straight into the fresh season (reuses the
+	# proven load path, so the whole 3D world rebuilds cleanly from the saved state).
+	if _consume_season_marker():
+		_menu._on_continue()
+	else:
+		_menu.show_main(_save.has_save())
+
+	# test hook: full prestige cycle — new game → earn → prestige (reloads) → new season shot
+	if OS.has_environment("PRESTIGE_DO"):
+		if _started:
+			# second pass: _on_continue already rebuilt the post-prestige season
+			await get_tree().create_timer(1.0).timeout
+			get_viewport().get_texture().get_image().save_png("res://_season_shot.png")
+			get_tree().quit()
+		else:
+			_menu._on_new_game()
+			sim.season_earned = 2500
+			await get_tree().create_timer(0.4).timeout
+			do_prestige()   # banks 5 stars, saves, reloads the scene
+			return
 
 	# test hook: screenshot the main menu, then quit (windowed binary, no --headless)
 	if OS.has_environment("MENU_SHOT"):
@@ -93,6 +112,29 @@ func _ready() -> void:
 		await get_tree().create_timer(1.5).timeout
 		var img2 := get_viewport().get_texture().get_image()
 		img2.save_png("res://_play_shot.png")
+		get_tree().quit()
+	# test hook: expand the field deep and confirm the camera reframes to keep it in view
+	if OS.has_environment("EXPAND_SHOT"):
+		_menu._on_new_game()
+		sim.coins = 1000000
+		while sim.rows < 14:
+			sim.buy_expand()
+		_rebuild_field()
+		_hud.refresh(sim)
+		await get_tree().create_timer(0.8).timeout
+		get_viewport().get_texture().get_image().save_png("res://_expand_shot.png")
+		get_tree().quit()
+	# test hook: drive the prestige confirm screen (with unlocked premium crops in the picker)
+	if OS.has_environment("PRESTIGE_SHOT"):
+		_menu._on_new_game()
+		sim.season_earned = 2500     # ~5 stars available
+		sim.harvested = 130          # unlocks Cilek + Misir in the seed picker
+		await get_tree().create_timer(0.5).timeout
+		_menu._show_pause()
+		_menu._show_prestige()
+		await get_tree().create_timer(0.6).timeout
+		var img3 := get_viewport().get_texture().get_image()
+		img3.save_png("res://_prestige_shot.png")
 		get_tree().quit()
 
 # Build the playable world. mode: "demo" (tests), "new" (fresh farm), "load" (from save).
@@ -110,6 +152,7 @@ func _start_game(mode: String) -> void:
 	_build_ground()
 	_build_soil_tiles()
 	_build_props()
+	_frame_camera()   # frame for the current field depth (matters after a loaded/expanded save)
 
 	var n: int = sim.states.size()
 	_crop_nodes.resize(n)
@@ -154,6 +197,36 @@ func continue_game() -> void:
 
 func has_save() -> bool:
 	return _save != null and _save.has_save()
+
+# --- prestige / Yeni Sezon (menu calls these; all duck-typed) ---
+func season_stars() -> int:
+	return sim.stars if sim != null else 0
+
+func season_can_prestige() -> bool:
+	return sim != null and sim.prestige_available()
+
+func season_star_gain() -> int:
+	return sim.prestige_gain() if sim != null else 0
+
+# Bank the season's stars, reset the farm, and rebuild the world via a scene reload.
+func do_prestige() -> void:
+	if sim == null or not sim.prestige_available():
+		return
+	sim.do_prestige()
+	_save.save_sim(sim)              # persist the fresh, star-boosted season
+	var f := FileAccess.open("user://season_continue", FileAccess.WRITE)
+	if f != null:
+		f.store_string("1")          # marker → _ready auto-continues into the new season
+		f.close()
+	get_tree().reload_current_scene()
+
+func _consume_season_marker() -> bool:
+	if not FileAccess.file_exists("user://season_continue"):
+		return false
+	var dir := DirAccess.open("user://")
+	if dir != null:
+		dir.remove("season_continue")
+	return true
 
 # First-run coach hints. Shown once ever (flag persisted by tutorial.gd), new games only.
 func _maybe_start_tutorial(is_new: bool) -> void:
@@ -257,6 +330,7 @@ func _rebuild_field() -> void:
 		_refresh_crop(i)
 	# field grew — slide the homestead back so the buildings stay clear of the plot
 	_reposition_homestead()
+	_frame_camera()   # and pull the camera back so the deeper field stays fully in view
 
 func _on_sell() -> void:
 	var earned: int = sim.sell_all()
@@ -520,6 +594,15 @@ func _origin() -> Vector3:
 
 func _tile_pos(c: int, r: int) -> Vector3:
 	return _origin() + Vector3(c * TILE, 0.0, r * TILE)
+
+# Pull the camera back + up as the field deepens so the whole plot stays in frame.
+# Tuned so rows=START_ROWS(6) reproduces the original framing (y12.6, z13.2).
+func _frame_camera() -> void:
+	if _cam == null or sim == null:
+		return
+	var depth := float(sim.rows) * TILE
+	_cam.global_position = Vector3(0.0, 5.4 + depth * 1.2, 6.0 + depth * 1.2)
+	_cam.look_at(Vector3(0.0, 0.0, -0.4), Vector3.UP)
 
 func _tile_cr(i: int) -> Vector2i:
 	return Vector2i(i % SimState.COLS, i / SimState.COLS)

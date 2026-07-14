@@ -8,7 +8,7 @@ class_name SimState
 # --- grid / lifecycle (ported verbatim from prototypes/bot-orchestration-concept) ---
 const COLS := 8
 const START_ROWS := 6
-const MAX_ROWS := 8
+const MAX_ROWS := 20         # was 8 — field is now a long-tail money sink, not a 2-step cap
 const GOLDEN_CHANCE := 0.08
 const OBSTACLE_CHANCE := 0.14
 
@@ -60,15 +60,25 @@ const C_GOLD := Color("#F4C542")
 const C_RED := Color("#C25B5B")
 const C_PANEL := Color("#EAD7AE")
 
+# value scales faster than grow-time up the tiers, so higher crops are more profit/sec
+# but cost more seed and unlock later (CROP_UNLOCK). WHEAT index (3=Bugday) is preserved.
 const CROPS := [
-	{"name": "Pancar", "grow": 3.0, "value": 2, "seed": 1, "col": Color("#9B5E7A")},
-	{"name": "Patates", "grow": 5.0, "value": 4, "seed": 2, "col": Color("#C9A86A")},
-	{"name": "Domates", "grow": 8.0, "value": 8, "seed": 4, "col": Color("#E07A5F")},
-	{"name": "Bugday", "grow": 6.0, "value": 3, "seed": 2, "col": Color("#E3C567")},
-	{"name": "Kabak", "grow": 7.0, "value": 6, "seed": 3, "col": Color("#E08A2F")},
-	{"name": "Uzum", "grow": 9.0, "value": 10, "seed": 4, "col": Color("#7D5BA6")},
-	{"name": "Karpuz", "grow": 11.0, "value": 13, "seed": 5, "col": Color("#3FA34D")},
+	{"name": "Pancar", "grow": 3.0, "value": 3, "seed": 1, "col": Color("#9B5E7A")},
+	{"name": "Patates", "grow": 5.0, "value": 6, "seed": 2, "col": Color("#C9A86A")},
+	{"name": "Domates", "grow": 8.0, "value": 12, "seed": 4, "col": Color("#E07A5F")},
+	{"name": "Bugday", "grow": 6.0, "value": 7, "seed": 2, "col": Color("#E3C567")},
+	{"name": "Kabak", "grow": 7.0, "value": 11, "seed": 3, "col": Color("#E08A2F")},
+	{"name": "Uzum", "grow": 9.0, "value": 18, "seed": 5, "col": Color("#7D5BA6")},
+	{"name": "Karpuz", "grow": 11.0, "value": 26, "seed": 7, "col": Color("#3FA34D")},
+	# --- premium tiers (unlocked by lifetime harvest; big numbers for that idle payoff) ---
+	{"name": "Cilek", "grow": 13.0, "value": 40, "seed": 10, "col": Color("#E23B5A")},
+	{"name": "Misir", "grow": 16.0, "value": 65, "seed": 16, "col": Color("#F2C230")},
+	{"name": "Aycicegi", "grow": 20.0, "value": 110, "seed": 28, "col": Color("#E8A317")},
+	{"name": "Altin Elma", "grow": 26.0, "value": 200, "seed": 55, "col": Color("#F4C542")},
 ]
+# crops unlock as lifetime `harvested` climbs — discovery + a reason to keep harvesting.
+# first 7 are open from the start (matches the original build); premium tiers gate in.
+const CROP_UNLOCK := [0, 0, 0, 0, 0, 0, 0, 40, 120, 280, 600]
 
 # --- economy constants (ported) ---
 const WHEAT := 3            # CROPS index of Bugday (sold as flour when a mill exists)
@@ -80,8 +90,36 @@ const WATER_COST := 4
 const FLOUR_VALUE := 10
 const START_STORAGE := 20
 
+# --- prestige / "Yeni Sezon" (the long-term idle loop) ---
+# You reset the farm but keep permanent Stars, which give a global sell multiplier.
+# Crop unlocks (lifetime `harvested`) and Stars persist across seasons — a cozy, soft
+# prestige: you rebuild faster each season instead of losing everything.
+const STAR_DIVISOR := 100.0        # stars gained = floor(sqrt(season_earned / DIVISOR))
+const STAR_BONUS := 0.15           # +15% global sell value per Star
+
+# --- milestones / "Gorevler" — always-visible next goal with a reward (retention) ---
+# metric keys: harvested | bots | rows | stars | upgrades | season_earned
+const MILESTONES := [
+	{"desc": "Ilk urununu hasat et", "metric": "harvested", "target": 1, "reward": 10},
+	{"desc": "5 urun hasat et", "metric": "harvested", "target": 5, "reward": 20},
+	{"desc": "Ilk robotunu al", "metric": "bots", "target": 1, "reward": 25},
+	{"desc": "Tarlani buyut", "metric": "rows", "target": 7, "reward": 30},
+	{"desc": "Bir yukseltme al", "metric": "upgrades", "target": 1, "reward": 40},
+	{"desc": "25 urun hasat et", "metric": "harvested", "target": 25, "reward": 55},
+	{"desc": "3 robota ulas", "metric": "bots", "target": 3, "reward": 70},
+	{"desc": "Cilek ac (40 hasat)", "metric": "harvested", "target": 40, "reward": 60},
+	{"desc": "100 urun hasat et", "metric": "harvested", "target": 100, "reward": 150},
+	{"desc": "Misir ac (120 hasat)", "metric": "harvested", "target": 120, "reward": 130},
+	{"desc": "Ilk Yeni Sezon (prestij)", "metric": "stars", "target": 1, "reward": 200},
+	{"desc": "6 robota ulas", "metric": "bots", "target": 6, "reward": 180},
+	{"desc": "Aycicegi ac (280 hasat)", "metric": "harvested", "target": 280, "reward": 260},
+	{"desc": "Tarlayi 12 siraya getir", "metric": "rows", "target": 12, "reward": 300},
+	{"desc": "3 Yildiza ulas", "metric": "stars", "target": 3, "reward": 400},
+	{"desc": "Altin Elma ac (600 hasat)", "metric": "harvested", "target": 600, "reward": 500},
+]
+
 # --- bots / buildings / events constants (ported) ---
-const MAX_BOTS := 14
+const MAX_BOTS := 30         # was 14 — more automation headroom for the long game
 const BOT_SPEED := 160.0     # base px/s (legacy 2D view tuning; unused in 3D)
 const BOT_SPEED_TILES := 2.4 # base movement speed in grid tiles/sec (sim-space)
 const BOT_ARRIVE := 0.06     # grid distance at which a bot starts working its target
@@ -113,9 +151,14 @@ var coins: int = START_COINS
 var water: int = START_WATER
 var stock: PackedInt32Array        # harvested crops awaiting sale, per crop type
 var flour: int = 0
-var harvested: int = 0
+var harvested: int = 0             # LIFETIME crops harvested (drives crop unlocks; survives prestige)
 var storage_cap: int = START_STORAGE
 var selected_seed: int = WHEAT     # which crop a tap plants (HUD picker)
+
+# prestige / milestones state (persisted)
+var stars: int = 0                 # permanent prestige currency (survives Yeni Sezon)
+var season_earned: int = 0         # coins earned THIS season (resets on prestige; feeds star gain)
+var milestone_idx: int = 0         # index of the current active milestone
 
 # upgrades / buildings (ported)
 var yield_level: int = 0
@@ -242,6 +285,9 @@ func to_dict() -> Dictionary:
 		"windmill_level": windmill_level, "depo_level": depo_level,
 		"scarecrow_charges": scarecrow_charges,
 		"event_timer": event_timer,
+		"stars": stars,
+		"season_earned": season_earned,
+		"milestone_idx": milestone_idx,
 		"bots": bot_list,
 	}
 
@@ -272,6 +318,9 @@ func from_dict(d: Dictionary) -> void:
 	windmill_level = int(d.get("windmill_level", 0))
 	depo_level = int(d.get("depo_level", 0))
 	scarecrow_charges = int(d.get("scarecrow_charges", 0))
+	stars = int(d.get("stars", 0))
+	season_earned = int(d.get("season_earned", 0))
+	milestone_idx = int(d.get("milestone_idx", 0))
 	event_timer = float(d.get("event_timer", randf_range(EVENT_MIN, EVENT_MAX)))
 	rain_t = 0.0; ufo_active = false; birds_active = false; sell_boost_t = 0.0
 	bots.clear()
@@ -343,6 +392,9 @@ func tick(delta: float) -> bool:
 		changed = true
 
 	if tick_bots(delta):
+		changed = true
+
+	if check_milestones():
 		changed = true
 	return changed
 
@@ -701,7 +753,109 @@ func sell_mult() -> float:
 	var m := yield_mult()
 	if sell_boost_t > 0.0:
 		m *= 1.5
+	m *= prestige_mult()
 	return m
+
+# permanent global sell multiplier from prestige Stars
+func prestige_mult() -> float:
+	return 1.0 + STAR_BONUS * float(stars)
+
+# All coin INCOME flows through here so we can also credit the season (for star gain).
+# Purchases (coins -= ...) do NOT go through this — only earnings do.
+func _earn(n: int) -> int:
+	coins += n
+	season_earned += n
+	return n
+
+# ---- crop unlock gating (by lifetime harvest) ----
+func crop_unlocked(i: int) -> bool:
+	if i < 0 or i >= CROPS.size():
+		return false
+	return harvested >= CROP_UNLOCK[i]
+
+func crop_count() -> int:
+	return CROPS.size()
+
+# ---- prestige / Yeni Sezon ----
+# Stars you'd earn if you prestiged right now.
+func prestige_gain() -> int:
+	return int(floor(sqrt(float(season_earned) / STAR_DIVISOR)))
+
+func prestige_available() -> bool:
+	return prestige_gain() >= 1
+
+# Reset the farm for a new season, banking the earned Stars. Keeps Stars (permanent),
+# lifetime `harvested` (so crop unlocks stay), and milestone progress.
+func do_prestige() -> int:
+	var gain := prestige_gain()
+	if gain < 1:
+		return 0
+	stars += gain
+	# rebuild the field fresh (rows/states/grow/crop_type/golden/stock/event_timer)
+	new_game()
+	# reset the economy + upgrades + bots + buildings; Stars and harvested persist
+	coins = START_COINS
+	water = START_WATER
+	flour = 0
+	storage_cap = START_STORAGE
+	selected_seed = WHEAT
+	yield_level = 0
+	speed_level = 0
+	dura_level = 0
+	well_level = 0
+	windmill_level = 0
+	depo_level = 0
+	scarecrow_charges = 0
+	sell_boost_t = 0.0
+	water_acc = 0.0
+	mill_acc = 0.0
+	bots.clear()
+	season_earned = 0
+	return gain
+
+# ---- milestones / Gorevler ----
+func milestone_active() -> bool:
+	return milestone_idx < MILESTONES.size()
+
+func milestone_current() -> Dictionary:
+	if not milestone_active():
+		return {}
+	return MILESTONES[milestone_idx]
+
+func _metric_value(metric: String) -> int:
+	match metric:
+		"harvested":
+			return harvested
+		"bots":
+			return bots.size()
+		"rows":
+			return rows
+		"stars":
+			return stars
+		"season_earned":
+			return season_earned
+		"upgrades":
+			return yield_level + speed_level + dura_level + well_level + windmill_level + depo_level
+	return 0
+
+func milestone_progress() -> int:
+	if not milestone_active():
+		return 0
+	return _metric_value(MILESTONES[milestone_idx]["metric"])
+
+# Grant rewards for every satisfied milestone and advance. Returns true if any completed
+# (so the view can toast + refresh). Called from tick().
+func check_milestones() -> bool:
+	var any := false
+	while milestone_active():
+		var m: Dictionary = MILESTONES[milestone_idx]
+		if _metric_value(m["metric"]) < int(m["target"]):
+			break
+		coins += int(m["reward"])
+		_emit_event("Hedef tamam: %s (+%d para)" % [m["desc"], int(m["reward"])])
+		milestone_idx += 1
+		any = true
+	return any
 
 func bot_speed() -> float:
 	return BOT_SPEED * (1.0 + 0.15 * float(speed_level))
@@ -721,7 +875,7 @@ func harvest_tile(idx: int, gold_mult: int, find_chance: float, overflow_sell: b
 	var is_gold: bool = golden[idx] or randf() < find_chance
 	if is_gold:
 		var base: int = CROPS[ct]["value"]
-		coins += int(round(float(base) * sell_mult())) * gold_mult
+		_earn(int(round(float(base) * sell_mult())) * gold_mult)
 		harvested += 1
 		golden[idx] = false
 		return true
@@ -729,7 +883,7 @@ func harvest_tile(idx: int, gold_mult: int, find_chance: float, overflow_sell: b
 		if not overflow_sell:
 			return false  # storage full — manual harvest is blocked
 		# depot full → overflow: sell this crop directly for coins so bots keep flowing
-		coins += int(round(float(CROPS[ct]["value"]) * sell_mult()))
+		_earn(int(round(float(CROPS[ct]["value"]) * sell_mult())))
 		harvested += 1
 		return true
 	stock[ct] = int(stock[ct]) + 1
@@ -747,7 +901,7 @@ func sell_all() -> int:
 		stock[ct] = 0
 	earned += int(round(float(FLOUR_VALUE) * sell_mult())) * flour
 	flour = 0
-	coins += earned
+	_earn(earned)
 	return earned
 
 # Buy one water bundle. Returns true if affordable AND the tank isn't already full

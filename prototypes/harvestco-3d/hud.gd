@@ -15,6 +15,8 @@ signal clear_zone_pressed         # wipe the whole shared work area
 var _coins: Label
 var _water: Label
 var _depo: Label
+var _stars: Label
+var _milestone: Label
 var _toast: Label
 var _seed_btns: Array = []
 var _seed_info: Label
@@ -45,6 +47,26 @@ func build(sim: SimState) -> void:
 	_coins = _stat(topbar, Color(1.0, 0.84, 0.35))   # gold
 	_water = _stat(topbar, Color(0.45, 0.78, 0.98))  # blue
 	_depo = _stat(topbar, Color(0.80, 0.90, 0.70))   # leaf
+	_stars = _stat(topbar, Color(1.0, 0.78, 0.30))   # prestige star (bright gold)
+
+	# ---- milestone strip: the always-visible "next goal" (left of the pause button) ----
+	var msbg := PanelContainer.new()
+	add_child(msbg)
+	msbg.anchor_left = 0.0; msbg.anchor_right = 1.0
+	msbg.anchor_top = 0.0; msbg.anchor_bottom = 0.0
+	msbg.offset_left = 14; msbg.offset_right = -72   # stop short of the top-right pause button
+	msbg.offset_top = 88; msbg.offset_bottom = 122
+	var mssb := StyleBoxFlat.new()
+	mssb.bg_color = Color(0.16, 0.13, 0.08, 0.72)
+	mssb.set_corner_radius_all(12)
+	mssb.content_margin_left = 12; mssb.content_margin_right = 12
+	mssb.content_margin_top = 2; mssb.content_margin_bottom = 2
+	msbg.add_theme_stylebox_override("panel", mssb)
+	_milestone = Label.new()
+	_milestone.add_theme_font_size_override("font_size", 15)
+	_milestone.add_theme_color_override("font_color", Color(1.0, 0.90, 0.62))
+	_milestone.clip_text = true
+	msbg.add_child(_milestone)
 
 	# ---- bottom controls: fixed-height box pinned to the bottom edge ----
 	var vb := VBoxContainer.new()
@@ -83,15 +105,18 @@ func build(sim: SimState) -> void:
 	_seed_info.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	vb.add_child(_seed_info)
 
-	# seed picker (one button per crop, each shows its buy price)
+	# seed picker — now horizontally scrollable (11 crops incl. locked premium tiers).
+	# each crop is a fixed-width chip; locked ones are dimmed with their unlock hint.
+	var seedscroll := ScrollContainer.new()
+	seedscroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	seedscroll.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	vb.add_child(seedscroll)
 	var seeds := HBoxContainer.new()
-	seeds.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	vb.add_child(seeds)
 	seeds.add_theme_constant_override("separation", 6)
+	seedscroll.add_child(seeds)
 	for i in range(sim.CROPS.size()):
 		var b := Button.new()
-		b.custom_minimum_size = Vector2(0, 58)
-		b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		b.custom_minimum_size = Vector2(74, 58)
 		b.add_theme_font_size_override("font_size", 14)
 		b.autowrap_mode = TextServer.AUTOWRAP_OFF
 		var idx := i
@@ -142,7 +167,7 @@ func build(sim: SimState) -> void:
 
 func _stat(parent: Node, color: Color) -> Label:
 	var l := Label.new()
-	l.add_theme_font_size_override("font_size", 24)
+	l.add_theme_font_size_override("font_size", 19)
 	l.add_theme_color_override("font_color", color)
 	l.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -153,16 +178,31 @@ func refresh(sim: SimState) -> void:
 	_coins.text = "Para %d" % sim.coins
 	_water.text = "Su %d" % sim.water
 	_depo.text = "Depo %d/%d" % [sim.stock_total(), sim.storage_cap]
+	if _stars != null:
+		_stars.text = "Yildiz %d" % sim.stars
+	if _milestone != null:
+		if sim.milestone_active():
+			var m: Dictionary = sim.milestone_current()
+			_milestone.text = "Hedef: %s  (%d/%d)  +%d para" % [
+				m["desc"], sim.milestone_progress(), int(m["target"]), int(m["reward"])]
+		else:
+			_milestone.text = "Tum hedefler tamam!  Yildiz: %d" % sim.stars
 	for i in range(_seed_btns.size()):
 		var b: Button = _seed_btns[i]
 		var col: Color = sim.CROPS[i]["col"]
 		var cname: String = sim.CROPS[i]["name"]
 		var buy: int = int(sim.CROPS[i]["seed"])
-		var selected: bool = i == sim.selected_seed
-		# crop-tinted button: dark fill by default, bright when selected
-		var base: Color = col.darkened(0.30) if not selected else col.lightened(0.10)
-		_style_button(b, base, selected)
-		b.text = "%s\nAl %d" % [cname, buy]
+		var unlocked: bool = sim.crop_unlocked(i)
+		var selected: bool = i == sim.selected_seed and unlocked
+		b.disabled = not unlocked
+		if unlocked:
+			var base: Color = col.darkened(0.30) if not selected else col.lightened(0.10)
+			_style_button(b, base, selected)
+			b.text = "%s\nAl %d" % [cname, buy]
+		else:
+			# locked: dimmed grey chip showing the harvest count that unlocks it
+			_style_button(b, Color(0.28, 0.28, 0.30))
+			b.text = "%s\n%d hasat" % [cname, int(sim.CROP_UNLOCK[i])]
 	# show buy + sell for the currently selected crop on the info line
 	if _seed_info != null and sim.selected_seed >= 0 and sim.selected_seed < sim.CROPS.size():
 		var c: Dictionary = sim.CROPS[sim.selected_seed]

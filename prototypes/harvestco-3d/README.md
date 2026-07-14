@@ -184,3 +184,28 @@ prototype — see standards note below).
 > **Prototype standards apply** (`.claude/rules/prototype-code.md`): this is a
 > production-*candidate* seed, not production code. If/when it graduates, the shell is rewritten
 > to production standards (scene files, DI, tests) — it is not migrated verbatim.
+
+## Depth pass — progression, prestige, and content (fixing "the game ends too fast") ✓
+Grounded in idle-game design research ([idle economy math](https://www.gamedeveloper.com/design/the-math-of-idle-games-part-i),
+[idle progression/retention](https://missionszanx.com/guides/idle-game-design-systems-mechanics-and-progression)):
+maliyet üstel, gelir daha yavaş; hard caps and the missing prestige loop were the churn cause.
+- **Rebalance** (`sim.gd`) — the two big growth axes are no longer 2-step dead ends: `MAX_ROWS`
+  8→20 (field is now a long-tail money sink), `MAX_BOTS` 14→30. Crop values scaled up and the
+  tiers spread (3→200) so numbers actually grow. The camera (`_frame_camera`) now pulls back/up as
+  the field deepens so a 20-row plot still frames on a portrait screen.
+- **Prestige / "Yeni Sezon"** (`sim.gd` + pause menu) — the long-term idle loop. You reset the farm
+  for permanent **Stars** (⭐), each giving +15% global sell value (`prestige_mult` folded into
+  `sell_mult`). Stars = `floor(sqrt(season_earned / 100))`. It's a *cozy* soft-prestige: crop
+  unlocks and Stars persist across seasons, so each season rebuilds faster. Executed via a scene
+  reload + a `season_continue` marker that auto-drops you into the new season (reuses the proven
+  load path → zero view-desync).
+- **Content depth** (`sim.gd` + `hud.gd`) — 7→**11 crops** (premium Çilek/Mısır/Ayçiçeği/Altın
+  Elma), gated by lifetime `harvested` (`CROP_UNLOCK`) so they unlock as you play (the seed picker
+  is now horizontally scrollable and shows locked crops with their unlock count). A **Görevler /
+  milestone** system (`MILESTONES`, `check_milestones`) shows an always-visible next goal with a
+  coin reward — constant direction, the retention staple.
+- **HUD** — new Yıldız chip + milestone strip; all income routed through `_earn()` so the season
+  total (which feeds Star gain) is tracked in one place.
+- Verified: `test_sim.gd` **70/70** + `test_meta.gd` (unlocks, prestige math, milestones, save
+  round-trip) **PASS**; screenshot hooks `PLAY_SHOT` / `PRESTIGE_SHOT` / `PRESTIGE_DO` (full
+  reset→new-season cycle) / `EXPAND_SHOT` (14-row camera reframe) all confirmed on-screen.

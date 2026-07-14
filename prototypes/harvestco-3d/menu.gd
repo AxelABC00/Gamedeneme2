@@ -34,7 +34,7 @@ func show_main(has_save: bool) -> void:
 	_set_pause_visible(false)
 	_dim.visible = true
 	_clear_panel()
-	var box := _panel_box("HarvestCo")
+	var box := _panel_box("Durdanın Tarlaları")
 	if has_save:
 		box.add_child(_btn("Devam Et", _on_continue))
 	box.add_child(_btn("Yeni Oyun", _on_new_game))
@@ -57,8 +57,37 @@ func _show_pause() -> void:
 	_clear_panel()
 	var box := _panel_box("Duraklatıldı")
 	box.add_child(_btn("Devam", _on_resume))
+	box.add_child(_btn("Yeni Sezon 🌟", _show_prestige))
 	box.add_child(_btn("Ayarlar", func(): _show_settings(true)))
 	box.add_child(_btn("Ana Menü", _on_to_main))
+
+# Prestige confirmation screen (reached from pause).
+func _show_prestige() -> void:
+	_dim.visible = true
+	_clear_panel()
+	var box := _panel_box("Yeni Sezon")
+	var gain: int = _world.season_star_gain()
+	var cur: int = _world.season_stars()
+
+	var info := Label.new()
+	info.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	info.custom_minimum_size = Vector2(340, 0)
+	info.add_theme_color_override("font_color", TEXT)
+	info.add_theme_font_size_override("font_size", 18)
+	info.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	info.text = "Çiftliği sıfırlarsın; her Yıldız kalıcı %%15 satış bonusu verir. Ürün kilitlerin ve Yıldızların kalır.\n\nŞu an: %d 🌟   →   Sonra: %d 🌟" % [cur, cur + gain]
+	box.add_child(info)
+
+	if _world.season_can_prestige():
+		box.add_child(_btn("Onayla (+%d 🌟)" % gain, func(): _world.do_prestige()))
+	else:
+		var note := Label.new()
+		note.text = "Henüz yeterli değil — biraz daha kazan."
+		note.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		note.add_theme_color_override("font_color", Color(0.85, 0.72, 0.55))
+		note.add_theme_font_size_override("font_size", 16)
+		box.add_child(note)
+	box.add_child(_btn("Geri", _show_pause))
 
 func _on_resume() -> void:
 	_hide_overlay()
