@@ -113,6 +113,18 @@ func _ready() -> void:
 		var img2 := get_viewport().get_texture().get_image()
 		img2.save_png("res://_play_shot.png")
 		get_tree().quit()
+	# test hook: open the store on the Binalar then Urunler tabs to check the new content
+	if OS.has_environment("STORE_SHOT"):
+		_menu._on_new_game()
+		sim.coins = 5000
+		await get_tree().create_timer(0.5).timeout
+		_store.open_store(sim, 2)   # Binalar (new buildings)
+		await get_tree().create_timer(0.4).timeout
+		get_viewport().get_texture().get_image().save_png("res://_store_bld.png")
+		_store.open_store(sim, 3)   # Urunler (crop showcase)
+		await get_tree().create_timer(0.4).timeout
+		get_viewport().get_texture().get_image().save_png("res://_store_crop.png")
+		get_tree().quit()
 	# test hook: expand the field deep and confirm the camera reframes to keep it in view
 	if OS.has_environment("EXPAND_SHOT"):
 		_menu._on_new_game()
@@ -1466,8 +1478,81 @@ func _build_props() -> void:
 	_build_windmill(Vector3(-1.0, 0.0, back_z - 0.2))
 	_build_well(Vector3(1.7, 0.0, back_z))
 	_build_depot(Vector3(4.0, 0.0, back_z))
+	# newer buildings, tucked into the gaps of the homestead band
+	_build_kompost(Vector3(-3.0, 0.0, back_z + 0.2))
+	_build_sera(Vector3(0.4, 0.0, back_z - 0.5))
+	_build_pazar(Vector3(2.85, 0.0, back_z + 0.15))
 
 	_build_scenery(back_z)
+
+# --- new building models (procedural; always present, gain function when bought) ---
+func _box_node(size: Vector3, color: Color, rough: float = 0.9) -> MeshInstance3D:
+	var m := MeshInstance3D.new()
+	var bm := BoxMesh.new(); bm.size = size
+	m.mesh = bm
+	m.material_override = _mat(color, rough)
+	return m
+
+# Sera (greenhouse): a translucent glass house with a peaked roof over little plant rows.
+func _build_sera(at: Vector3) -> void:
+	var root := Node3D.new(); _homestead.add_child(root); root.position = at
+	var found := _box_node(Vector3(1.5, 0.14, 1.15), Color(0.42, 0.30, 0.20))
+	found.position = Vector3(0, 0.07, 0); root.add_child(found)
+	for gx in range(3):
+		var prow := _ball_node(Color(0.35, 0.60, 0.32), 0.12, 0.85)
+		prow.scale = Vector3(1.4, 0.7, 3.0)
+		prow.position = Vector3(-0.45 + gx * 0.45, 0.2, 0); root.add_child(prow)
+	var glass := _box_node(Vector3(1.5, 0.85, 1.15), Color(0.78, 0.93, 0.86), 0.1)
+	var gm := glass.material_override as StandardMaterial3D
+	gm.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	gm.albedo_color.a = 0.34
+	glass.position = Vector3(0, 0.6, 0); root.add_child(glass)
+	var roof := MeshInstance3D.new()
+	var pm := PrismMesh.new(); pm.size = Vector3(1.6, 0.5, 1.2)
+	roof.mesh = pm
+	var rm := _mat(Color(0.82, 0.95, 0.90), 0.1)
+	rm.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA; rm.albedo_color.a = 0.40
+	roof.material_override = rm
+	roof.position = Vector3(0, 1.25, 0); root.add_child(roof)
+	for sx in [-0.72, 0.72]:
+		for sz in [-0.55, 0.55]:
+			var post := _box_node(Vector3(0.06, 0.9, 0.06), Color(0.95, 0.95, 0.92), 0.5)
+			post.position = Vector3(sx, 0.6, sz); root.add_child(post)
+
+# Pazar (market stall): a wooden counter under a red-and-cream striped canopy, with produce.
+func _build_pazar(at: Vector3) -> void:
+	var root := Node3D.new(); _homestead.add_child(root); root.position = at
+	var counter := _box_node(Vector3(1.4, 0.7, 0.6), Color(0.55, 0.38, 0.22))
+	counter.position = Vector3(0, 0.35, 0.2); root.add_child(counter)
+	for sx in [-0.65, 0.65]:
+		for sz in [-0.45, 0.45]:
+			var post := _cyl_node(Color(0.45, 0.30, 0.18), 0.05, 1.4)
+			post.position = Vector3(sx, 0.7, sz); root.add_child(post)
+	for k in range(5):
+		var col: Color = Color(0.80, 0.28, 0.24) if k % 2 == 0 else Color(0.95, 0.92, 0.82)
+		var slat := _box_node(Vector3(0.3, 0.06, 1.3), col, 0.7)
+		slat.position = Vector3(-0.6 + k * 0.3, 1.45, 0)
+		slat.rotation_degrees = Vector3(12, 0, 0)
+		root.add_child(slat)
+	var goods := [Color(0.90, 0.30, 0.25), Color(0.95, 0.72, 0.22), Color(0.50, 0.70, 0.32)]
+	var cxs := [-0.4, 0.1, 0.55]
+	for i in range(3):
+		var crate := _box_node(Vector3(0.3, 0.22, 0.3), Color(0.60, 0.42, 0.24), 0.8)
+		crate.position = Vector3(cxs[i], 0.8, 0.2); root.add_child(crate)
+		var good := _ball_node(goods[i], 0.12, 0.7)
+		good.position = Vector3(cxs[i], 0.98, 0.2); root.add_child(good)
+
+# Kompost (compost bin): a small wooden bin with a dark mulch mound and green scraps.
+func _build_kompost(at: Vector3) -> void:
+	var root := Node3D.new(); _homestead.add_child(root); root.position = at
+	var bin := _box_node(Vector3(0.9, 0.5, 0.9), Color(0.40, 0.27, 0.16))
+	bin.position = Vector3(0, 0.25, 0); root.add_child(bin)
+	var mound := _ball_node(Color(0.28, 0.20, 0.12), 0.42, 1.0)
+	mound.scale = Vector3(1.0, 0.6, 1.0)
+	mound.position = Vector3(0, 0.5, 0); root.add_child(mound)
+	for s in [Vector3(-0.2, 0.6, 0.15), Vector3(0.22, 0.62, -0.1), Vector3(0.05, 0.64, 0.25)]:
+		var scrap := _ball_node(Color(0.45, 0.60, 0.30), 0.1, 0.8)
+		scrap.position = s; root.add_child(scrap)
 
 # Slide the homestead so it stays the same distance behind the field's back edge as
 # the plot grows. Children were built at the START back edge, so we offset by the delta.

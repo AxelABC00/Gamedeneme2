@@ -50,6 +50,15 @@ const IT_EXPAND := 12
 const IT_WINDMILL := 13
 const IT_DEPO := 14
 const IT_SCARE := 15
+const IT_SERA := 16          # greenhouse — speeds crop growth
+const IT_PAZAR := 17         # market stall — passive coin income
+const IT_KOMPOST := 18       # compost — raises the golden-crop chance on every harvest
+const IT_CROP := 100         # crop showcase rows (IT_CROP + crop index); info-only, no buy
+
+# new-building tuning
+const SERA_GROWTH := 0.15    # +15% growth rate per greenhouse level
+const MARKET_RATE := 0.5     # passive coins/sec per market level
+const KOMPOST_GOLD := 0.02   # +2% golden chance per compost level (on every harvest)
 
 # Store palette accents (ported; the 3D store reads these for row tinting)
 const C_SOIL := Color("#7B5B3A")
@@ -167,6 +176,11 @@ var dura_level: int = 0
 var well_level: int = 0
 var windmill_level: int = 0
 var depo_level: int = 0
+var sera_level: int = 0             # greenhouse (growth speed)
+var pazar_level: int = 0            # market (passive coins)
+var kompost_level: int = 0         # compost (golden chance)
+var coin_acc: float = 0.0          # market passive-coin fractional accumulator
+var unlocked_seen: int = 7         # crops already announced (first 7 open, no toast)
 var scarecrow_charges: int = 0
 var sell_boost_t: float = 0.0      # trader event boost (set in Phase H events)
 var water_acc: float = 0.0         # passive-well fractional water accumulator
@@ -283,11 +297,13 @@ func to_dict() -> Dictionary:
 		"yield_level": yield_level, "speed_level": speed_level,
 		"dura_level": dura_level, "well_level": well_level,
 		"windmill_level": windmill_level, "depo_level": depo_level,
+		"sera_level": sera_level, "pazar_level": pazar_level, "kompost_level": kompost_level,
 		"scarecrow_charges": scarecrow_charges,
 		"event_timer": event_timer,
 		"stars": stars,
 		"season_earned": season_earned,
 		"milestone_idx": milestone_idx,
+		"unlocked_seen": unlocked_seen,
 		"bots": bot_list,
 	}
 
@@ -317,10 +333,14 @@ func from_dict(d: Dictionary) -> void:
 	well_level = int(d.get("well_level", 0))
 	windmill_level = int(d.get("windmill_level", 0))
 	depo_level = int(d.get("depo_level", 0))
+	sera_level = int(d.get("sera_level", 0))
+	pazar_level = int(d.get("pazar_level", 0))
+	kompost_level = int(d.get("kompost_level", 0))
 	scarecrow_charges = int(d.get("scarecrow_charges", 0))
 	stars = int(d.get("stars", 0))
 	season_earned = int(d.get("season_earned", 0))
 	milestone_idx = int(d.get("milestone_idx", 0))
+	unlocked_seen = int(d.get("unlocked_seen", 7))
 	event_timer = float(d.get("event_timer", randf_range(EVENT_MIN, EVENT_MAX)))
 	rain_t = 0.0; ufo_active = false; birds_active = false; sell_boost_t = 0.0
 	bots.clear()
@@ -363,10 +383,11 @@ func _pack_f(a) -> PackedFloat32Array:
 # Time-based growth (ported). Returns true if any tile changed stage (view refresh).
 func tick(delta: float) -> bool:
 	var changed := false
+	var gmul := growth_mult()   # greenhouse speeds every growing crop
 	for i in range(states.size()):
 		if states[i] == GROWING:
 			var gt: float = CROPS[crop_type[i]]["grow"]
-			grow[i] += delta / gt
+			grow[i] += delta * gmul / gt
 			if grow[i] >= 1.0:
 				grow[i] = 1.0
 				states[i] = RIPE
@@ -384,6 +405,13 @@ func tick(delta: float) -> bool:
 			stock[WHEAT] = int(stock[WHEAT]) - 1
 			flour += 1
 			mill_acc -= 1.0
+	# market: a steady passive coin trickle (the "idle" faucet). Counts as season income.
+	if pazar_level > 0:
+		coin_acc += float(pazar_level) * MARKET_RATE * delta
+		if coin_acc >= 1.0:
+			var whole := int(coin_acc)
+			coin_acc -= float(whole)
+			_earn(whole)
 
 	if sell_boost_t > 0.0:
 		sell_boost_t = max(sell_boost_t - delta, 0.0)
@@ -396,7 +424,20 @@ func tick(delta: float) -> bool:
 
 	if check_milestones():
 		changed = true
+
+	if _check_unlocks():
+		changed = true
 	return changed
+
+# Announce newly-unlocked crops as they cross their lifetime-harvest threshold.
+# CROP_UNLOCK is ascending, so a single forward scan suffices.
+func _check_unlocks() -> bool:
+	var any := false
+	while unlocked_seen < CROPS.size() and harvested >= CROP_UNLOCK[unlocked_seen]:
+		_emit_event("Yeni urun acildi: %s!" % CROPS[unlocked_seen]["name"])
+		unlocked_seen += 1
+		any = true
+	return any
 
 # Advances all active events + the countdown to the next one. Returns true if a tile
 # changed (UFO crop-circle / birds eating) so the view refreshes affected tiles.
@@ -749,6 +790,14 @@ func stock_total() -> int:
 func yield_mult() -> float:
 	return 1.0 + 0.10 * float(yield_level)
 
+# greenhouse: multiplies crop growth speed
+func growth_mult() -> float:
+	return 1.0 + SERA_GROWTH * float(sera_level)
+
+# compost: extra golden-crop chance applied to EVERY harvest
+func kompost_bonus() -> float:
+	return KOMPOST_GOLD * float(kompost_level)
+
 func sell_mult() -> float:
 	var m := yield_mult()
 	if sell_boost_t > 0.0:
@@ -805,10 +854,14 @@ func do_prestige() -> int:
 	well_level = 0
 	windmill_level = 0
 	depo_level = 0
+	sera_level = 0
+	pazar_level = 0
+	kompost_level = 0
 	scarecrow_charges = 0
 	sell_boost_t = 0.0
 	water_acc = 0.0
 	mill_acc = 0.0
+	coin_acc = 0.0
 	bots.clear()
 	season_earned = 0
 	return gain
@@ -872,7 +925,7 @@ func wear_rate() -> float:
 # leaves it false, so a full depot still blocks the player (red flash → go sell).
 func harvest_tile(idx: int, gold_mult: int, find_chance: float, overflow_sell: bool = false) -> bool:
 	var ct: int = crop_type[idx]
-	var is_gold: bool = golden[idx] or randf() < find_chance
+	var is_gold: bool = golden[idx] or randf() < (find_chance + kompost_bonus())
 	if is_gold:
 		var base: int = CROPS[ct]["value"]
 		_earn(int(round(float(base) * sell_mult())) * gold_mult)
@@ -1007,6 +1060,15 @@ func windmill_cost() -> int:
 func depo_cost() -> int:
 	return int(round(18.0 * pow(1.5, float(depo_level))))
 
+func sera_cost() -> int:
+	return int(round(28.0 * pow(1.7, float(sera_level))))
+
+func pazar_cost() -> int:
+	return int(round(35.0 * pow(1.8, float(pazar_level))))
+
+func kompost_cost() -> int:
+	return int(round(24.0 * pow(1.6, float(kompost_level))))
+
 func buy_yield() -> bool:
 	var c := yield_cost()
 	if coins < c:
@@ -1064,6 +1126,30 @@ func buy_depo() -> bool:
 	storage_cap += 20
 	return true
 
+func buy_sera() -> bool:
+	var c := sera_cost()
+	if coins < c:
+		return false
+	coins -= c
+	sera_level += 1
+	return true
+
+func buy_pazar() -> bool:
+	var c := pazar_cost()
+	if coins < c:
+		return false
+	coins -= c
+	pazar_level += 1
+	return true
+
+func buy_kompost() -> bool:
+	var c := kompost_cost()
+	if coins < c:
+		return false
+	coins -= c
+	kompost_level += 1
+	return true
+
 func can_expand() -> bool:
 	return rows < MAX_ROWS
 
@@ -1101,10 +1187,18 @@ func tab_items(tab: int) -> Array:
 			return [TILL, PLANT, WATER, HARVEST, CLEAN, GOLD_HUNT]
 		1:
 			return [IT_WATER, IT_REPAIR, IT_SCARE, IT_YIELD, IT_SPEED, IT_DURA, IT_WELL]
+		2:
+			return [IT_EXPAND, IT_WINDMILL, IT_DEPO, IT_SERA, IT_PAZAR, IT_KOMPOST]
 		_:
-			return [IT_EXPAND, IT_WINDMILL, IT_DEPO]
+			# tab 3 = crop showcase (info-only rows), one per crop
+			var out: Array = []
+			for i in range(CROPS.size()):
+				out.append(IT_CROP + i)
+			return out
 
 func item_cost(id: int) -> int:
+	if id >= IT_CROP:
+		return 0
 	if id <= GOLD_HUNT:
 		return bot_cost(id)
 	match id:
@@ -1128,9 +1222,17 @@ func item_cost(id: int) -> int:
 			return depo_cost()
 		IT_EXPAND:
 			return expand_cost()
+		IT_SERA:
+			return sera_cost()
+		IT_PAZAR:
+			return pazar_cost()
+		IT_KOMPOST:
+			return kompost_cost()
 	return 0
 
 func item_enabled(id: int) -> bool:
+	if id >= IT_CROP:
+		return false   # crop showcase rows are info-only (never a buy)
 	var cost := item_cost(id)
 	if id <= GOLD_HUNT:
 		return coins >= cost and bots.size() < MAX_BOTS
@@ -1144,6 +1246,13 @@ func item_enabled(id: int) -> bool:
 
 # [accent: Color, letter: String, title: String, desc: String]
 func item_info(id: int) -> Array:
+	if id >= IT_CROP:
+		var ci: int = id - IT_CROP
+		var cd: Dictionary = CROPS[ci]
+		var status := "Acik" if crop_unlocked(ci) else "Kilitli - %d hasat" % int(CROP_UNLOCK[ci])
+		return [cd["col"], String(cd["name"]).substr(0, 1),
+			"%s  (Satis %d)" % [cd["name"], int(cd["value"])],
+			"Buyume %ds  -  %s" % [int(cd["grow"]), status]]
 	if id <= GOLD_HUNT:
 		return [TASK_COL[id], TASK_LETTER[id], TASK_NAME[id] + " bot", TASK_DESC[id]]
 	match id:
@@ -1167,9 +1276,17 @@ func item_info(id: int) -> Array:
 			return [C_SOIL, "D", "Depo+ (%d)" % storage_cap, "Depolama kapasitesini artirir"]
 		IT_EXPAND:
 			return [C_GROW_A, "+", "Tarla Buyut", "+1 sira ekler (%d/%d)" % [rows, MAX_ROWS]]
+		IT_SERA:
+			return [C_GROW_B, "S", "Sera (sv.%d)" % sera_level, "Ekinler %d%% daha hizli buyur" % int(SERA_GROWTH * 100)]
+		IT_PAZAR:
+			return [C_GOLD, "P", "Pazar (sv.%d)" % pazar_level, "Pasif para kazandirir (%.1f/sn/sv)" % MARKET_RATE]
+		IT_KOMPOST:
+			return [C_SOIL, "G", "Kompost (sv.%d)" % kompost_level, "Altin urun sansini +%d%% artirir" % int(KOMPOST_GOLD * 100)]
 	return [C_PANEL, "?", "?", ""]
 
 func item_cost_text(id: int) -> String:
+	if id >= IT_CROP:
+		return "Acik" if crop_unlocked(id - IT_CROP) else "Kilit"
 	if id == IT_EXPAND and not can_expand():
 		return "MAX"
 	if id == IT_REPAIR and bots.is_empty():
@@ -1179,6 +1296,8 @@ func item_cost_text(id: int) -> String:
 # Returns a result dict: {bought: bool, close: bool, bot: Bot|null, row: int}.
 # close=true means the store should close (bot bought, so the player can paint a zone).
 func buy_item(id: int) -> Dictionary:
+	if id >= IT_CROP:
+		return {"bought": false, "close": false, "bot": null, "row": -1}  # info-only
 	if id <= GOLD_HUNT:
 		var b := buy_bot(id)
 		return {"bought": b != null, "close": b != null, "bot": b, "row": -1}
@@ -1203,6 +1322,12 @@ func buy_item(id: int) -> Dictionary:
 			ok = buy_windmill()
 		IT_DEPO:
 			ok = buy_depo()
+		IT_SERA:
+			ok = buy_sera()
+		IT_PAZAR:
+			ok = buy_pazar()
+		IT_KOMPOST:
+			ok = buy_kompost()
 		IT_EXPAND:
 			row = buy_expand()
 			ok = row >= 0

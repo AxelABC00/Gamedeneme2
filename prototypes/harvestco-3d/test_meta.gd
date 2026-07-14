@@ -56,5 +56,53 @@ func _init():
 	if b.season_earned != 999: ok = false; print("FAIL save season ", b.season_earned)
 	if b.milestone_idx != 5: ok = false; print("FAIL save milestone ", b.milestone_idx)
 
+	# --- new buildings (Sera / Pazar / Kompost) on a fresh sim ---
+	var c = Sim.new()
+	c.new_game()
+	# greenhouse growth multiplier
+	c.sera_level = 2
+	if abs(c.growth_mult() - 1.3) > 0.001: ok = false; print("FAIL growth_mult ", c.growth_mult())
+	# market passive coin trickle: pazar 2 * 0.5/s * 1s = 1 coin
+	c.pazar_level = 2
+	var cbefore = c.coins
+	var sbefore = c.season_earned
+	c.tick(1.0)
+	if c.coins < cbefore + 1: ok = false; print("FAIL market income ", c.coins - cbefore)
+	if c.season_earned <= sbefore: ok = false; print("FAIL market not counted as season income")
+	# compost golden bonus
+	c.kompost_level = 5
+	if abs(c.kompost_bonus() - 0.10) > 0.001: ok = false; print("FAIL kompost_bonus ", c.kompost_bonus())
+	# buy funcs increment levels
+	c.coins = 100000
+	if not c.buy_sera() or c.sera_level != 3: ok = false; print("FAIL buy_sera")
+	if not c.buy_pazar() or c.pazar_level != 3: ok = false; print("FAIL buy_pazar")
+	if not c.buy_kompost() or c.kompost_level != 6: ok = false; print("FAIL buy_kompost")
+
+	# --- store model: crops tab + building tab + info-only crop rows ---
+	var crop_tab = c.tab_items(3)
+	if crop_tab.size() != 11: ok = false; print("FAIL crop tab size ", crop_tab.size())
+	if int(crop_tab[0]) != c.IT_CROP: ok = false; print("FAIL crop tab first id ", crop_tab[0])
+	var bld_tab = c.tab_items(2)
+	if not (c.IT_SERA in bld_tab and c.IT_PAZAR in bld_tab and c.IT_KOMPOST in bld_tab):
+		ok = false; print("FAIL building tab missing new buildings")
+	if c.item_enabled(c.IT_CROP + 0): ok = false; print("FAIL crop row should be info-only (disabled)")
+	if c.item_cost_text(c.IT_CROP + 0) != "Acik": ok = false; print("FAIL crop0 cost text ", c.item_cost_text(c.IT_CROP + 0))
+	c.harvested = 0
+	if c.item_cost_text(c.IT_CROP + 7) != "Kilit": ok = false; print("FAIL crop7 should read Kilit")
+	if c.buy_item(c.IT_CROP + 0)["bought"]: ok = false; print("FAIL crop row should not be buyable")
+
+	# --- unlock announce ---
+	c.unlocked_seen = 7
+	c.harvested = 40
+	if not c._check_unlocks(): ok = false; print("FAIL _check_unlocks should fire at 40")
+	if c.unlocked_seen != 8: ok = false; print("FAIL unlocked_seen ", c.unlocked_seen)
+
+	# --- save round-trip of the new building fields ---
+	c.sera_level = 4; c.pazar_level = 2; c.kompost_level = 3; c.unlocked_seen = 9
+	var e = Sim.new()
+	e.from_dict(JSON.parse_string(JSON.stringify(c.to_dict())))
+	if e.sera_level != 4 or e.pazar_level != 2 or e.kompost_level != 3: ok = false; print("FAIL save building levels")
+	if e.unlocked_seen != 9: ok = false; print("FAIL save unlocked_seen ", e.unlocked_seen)
+
 	print("SIMTEST ", "PASS" if ok else "FAIL")
 	quit()

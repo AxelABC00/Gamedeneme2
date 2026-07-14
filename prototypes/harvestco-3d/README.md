@@ -209,3 +209,18 @@ maliyet üstel, gelir daha yavaş; hard caps and the missing prestige loop were 
 - Verified: `test_sim.gd` **70/70** + `test_meta.gd` (unlocks, prestige math, milestones, save
   round-trip) **PASS**; screenshot hooks `PLAY_SHOT` / `PRESTIGE_SHOT` / `PRESTIGE_DO` (full
   reset→new-season cycle) / `EXPAND_SHOT` (14-row camera reframe) all confirmed on-screen.
+
+## Store showcase + building variety ✓
+- **Crop showcase tab** (`sim.gd` + `store.gd`) — a 4th store tab **"Urunler"** lists all 11 crops
+  with sell value, grow time, and unlock status (info-only rows reuse the generic store row model
+  via `IT_CROP + index` pseudo-ids; locked crops read "Kilitli - N hasat"). Teases the premium
+  tiers so the player sees what's ahead. New crops also **toast on unlock** (`_check_unlocks`).
+- **Three new buildings** (`sim.gd` logic + `world.gd` low-poly models, in the homestead band):
+  - **Sera** (greenhouse) — `growth_mult()` speeds every growing crop +15%/level.
+  - **Pazar** (market stall) — a passive coin trickle (`MARKET_RATE`/sec/level), routed through
+    `_earn()` so it counts toward the season (idle "faucet").
+  - **Kompost** (compost bin) — `kompost_bonus()` adds +2%/level golden-crop chance to every harvest.
+  All three persist in save/load and reset on prestige (Stars/unlocks still persist).
+- Verified: `test_meta.gd` extended (growth mult, market income, compost bonus, crop/building tabs,
+  info-only crop rows, unlock announce, save round-trip) **PASS**; `STORE_SHOT` screenshots of the
+  Binalar + Urunler tabs and `PLAY_SHOT` (3 new buildings in the scene) confirmed on-screen.

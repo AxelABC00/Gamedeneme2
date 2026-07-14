@@ -8,7 +8,7 @@ class_name Store
 signal buy_requested(id: int)
 signal closed
 
-const TAB_NAMES := ["Botlar", "Yukseltmeler", "Binalar"]
+const TAB_NAMES := ["Botlar", "Yukselt", "Binalar", "Urunler"]
 
 var _tab: int = 0
 var _root: Control
@@ -92,7 +92,7 @@ func build(sim: SimState) -> void:
 		b.toggle_mode = true
 		b.custom_minimum_size = Vector2(0, 50)
 		b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		b.add_theme_font_size_override("font_size", 18)
+		b.add_theme_font_size_override("font_size", 15)
 		var idx := i
 		b.pressed.connect(func() -> void: _select_tab(idx, sim))
 		tabs.add_child(b)
