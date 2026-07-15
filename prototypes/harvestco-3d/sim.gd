@@ -53,11 +53,12 @@ const IT_SCARE := 15
 const IT_SERA := 16          # greenhouse — speeds crop growth
 const IT_PAZAR := 17         # market stall — passive coin income
 const IT_KOMPOST := 18       # compost — raises the golden-crop chance on every harvest
+const IT_AHIR := 19          # barn — raises the bot cap (max_bots)
 const IT_CROP := 100         # crop showcase rows (IT_CROP + crop index); info-only, no buy
 
 # new-building tuning
 const SERA_GROWTH := 0.15    # +15% growth rate per greenhouse level
-const MARKET_RATE := 0.5     # passive coins/sec per market level
+const MARKET_RATE := 0.3     # passive coins/sec per market level
 const KOMPOST_GOLD := 0.02   # +2% golden chance per compost level (on every harvest)
 
 # Store palette accents (ported; the 3D store reads these for row tinting)
@@ -86,11 +87,17 @@ const CROPS := [
 	{"name": "Altin Elma", "grow": 26.0, "value": 200, "seed": 55, "col": Color("#F4C542")},
 	{"name": "Mantar", "grow": 32.0, "value": 340, "seed": 90, "col": Color("#C98A6A")},
 	{"name": "Ejder Meyvesi", "grow": 40.0, "value": 560, "seed": 150, "col": Color("#D14E8C")},
+	# extra variety across the whole ladder (2 open-from-start, 2 premium). The seed picker
+	# and store crop tab display crops in tier order (crop_order), so array position is free.
+	{"name": "Marul", "grow": 4.0, "value": 5, "seed": 1, "col": Color("#8FBF52")},
+	{"name": "Biber", "grow": 10.0, "value": 22, "seed": 6, "col": Color("#D8433B")},
+	{"name": "Nar", "grow": 22.0, "value": 150, "seed": 40, "col": Color("#B33049")},
+	{"name": "Ananas", "grow": 30.0, "value": 420, "seed": 110, "col": Color("#E6B325")},
 ]
 # crops unlock as lifetime `harvested` climbs — discovery + a reason to keep harvesting.
-# first 7 are open from the start; premium tiers gate in over a real session (thresholds
-# tuned against the autoplay sim so the last crop is a multi-hour goal, not a 5-min one).
-const CROP_UNLOCK := [0, 0, 0, 0, 0, 0, 0, 60, 400, 1800, 6000, 18000, 45000]
+# tuned against the autoplay sim so the ladder spans a long session, not 5 minutes.
+# order matches CROPS: [7 basics..] Cilek Misir Aycicek AltinElma Mantar Ejder | Marul Biber Nar Ananas
+const CROP_UNLOCK := [0, 0, 0, 0, 0, 0, 0, 60, 500, 2400, 9000, 32000, 90000, 0, 150, 5000, 55000]
 
 # --- economy constants (ported) ---
 const WHEAT := 3            # CROPS index of Bugday (sold as flour when a mill exists)
@@ -138,11 +145,13 @@ const MILESTONES := [
 ]
 
 # --- bots / buildings / events constants (ported) ---
-const MAX_BOTS := 30         # was 14 — more automation headroom for the long game
+const MAX_BOTS := 30         # absolute ceiling
+const BOT_CAP_BASE := 5      # bots you can run before building any Ahir (Barn)
+const BARN_STEP := 2         # +bots per Ahir level (gates the bot flood -> paces the game)
 const BOT_SPEED := 160.0     # base px/s (legacy 2D view tuning; unused in 3D)
 const BOT_SPEED_TILES := 2.4 # base movement speed in grid tiles/sec (sim-space)
 const BOT_ARRIVE := 0.06     # grid distance at which a bot starts working its target
-const WORK_TIME := 0.25
+const WORK_TIME := 0.5       # sec a bot spends per tile action; higher = lower farm throughput
 const MAINT_DECAY := 1.0 / 900.0   # ~15 min to fully wear; worn bots slow down, never hard-stop
 const COND_FLOOR := 0.30           # condition never drops below this, so bots always keep working
 const COND_SPEED_MIN := 0.5        # slowest a fully-worn bot moves/works (fraction of normal)
@@ -189,8 +198,9 @@ var depo_level: int = 0
 var sera_level: int = 0             # greenhouse (growth speed)
 var pazar_level: int = 0            # market (passive coins)
 var kompost_level: int = 0         # compost (golden chance)
+var barn_level: int = 0            # barn (raises the bot cap)
 var coin_acc: float = 0.0          # market passive-coin fractional accumulator
-var unlocked_seen: int = 7         # crops already announced (first 7 open, no toast)
+var unlocked_seen: int = 0         # tier-sorted crops already passed by _check_unlocks
 var scarecrow_charges: int = 0
 var sell_boost_t: float = 0.0      # trader event boost (set in Phase H events)
 var water_acc: float = 0.0         # passive-well fractional water accumulator
@@ -308,6 +318,7 @@ func to_dict() -> Dictionary:
 		"dura_level": dura_level, "well_level": well_level,
 		"windmill_level": windmill_level, "depo_level": depo_level,
 		"sera_level": sera_level, "pazar_level": pazar_level, "kompost_level": kompost_level,
+		"barn_level": barn_level,
 		"scarecrow_charges": scarecrow_charges,
 		"event_timer": event_timer,
 		"stars": stars,
@@ -347,11 +358,12 @@ func from_dict(d: Dictionary) -> void:
 	sera_level = int(d.get("sera_level", 0))
 	pazar_level = int(d.get("pazar_level", 0))
 	kompost_level = int(d.get("kompost_level", 0))
+	barn_level = int(d.get("barn_level", 0))
 	scarecrow_charges = int(d.get("scarecrow_charges", 0))
 	stars = int(d.get("stars", 0))
 	season_earned = int(d.get("season_earned", 0))
 	milestone_idx = int(d.get("milestone_idx", 0))
-	unlocked_seen = int(d.get("unlocked_seen", 7))
+	unlocked_seen = int(d.get("unlocked_seen", 0))
 	water_acc = float(d.get("water_acc", 0.0))
 	mill_acc = float(d.get("mill_acc", 0.0))
 	coin_acc = float(d.get("coin_acc", 0.0))
@@ -444,13 +456,20 @@ func tick(delta: float) -> bool:
 	return changed
 
 # Announce newly-unlocked crops as they cross their lifetime-harvest threshold.
-# CROP_UNLOCK is ascending, so a single forward scan suffices.
+# Walks crops in TIER order (crop_order) so appended crops still announce correctly.
+# unlocked_seen = how many tier-sorted crops have been passed; open-from-start crops
+# (unlock == 0) advance it silently on the first tick.
 func _check_unlocks() -> bool:
+	var order := crop_order()
 	var any := false
-	while unlocked_seen < CROPS.size() and harvested >= CROP_UNLOCK[unlocked_seen]:
-		_emit_event("Yeni urun acildi: %s!" % CROPS[unlocked_seen]["name"])
+	while unlocked_seen < order.size():
+		var ci: int = int(order[unlocked_seen])
+		if not crop_unlocked(ci):
+			break
+		if CROP_UNLOCK[ci] > 0:
+			_emit_event("Yeni urun acildi: %s!" % CROPS[ci]["name"])
+			any = true
 		unlocked_seen += 1
-		any = true
 	return any
 
 # Advances all active events + the countdown to the next one. Returns true if a tile
@@ -802,7 +821,7 @@ func stock_total() -> int:
 
 # --- multipliers (ported) ---
 func yield_mult() -> float:
-	return 1.0 + 0.10 * float(yield_level)
+	return 1.0 + 0.08 * float(yield_level)
 
 # greenhouse: multiplies crop growth speed
 func growth_mult() -> float:
@@ -839,6 +858,22 @@ func crop_unlocked(i: int) -> bool:
 func crop_count() -> int:
 	return CROPS.size()
 
+# how many bots the player can run right now (base + barns, capped)
+func max_bots() -> int:
+	return min(MAX_BOTS, BOT_CAP_BASE + barn_level * BARN_STEP)
+
+# crop indices sorted for display: by unlock threshold, then value. Lets us append new
+# crops anywhere in CROPS while the seed picker / store still show them in tier order.
+func crop_order() -> Array:
+	var idx: Array = []
+	for i in range(CROPS.size()):
+		idx.append(i)
+	idx.sort_custom(func(a, b):
+		if CROP_UNLOCK[a] != CROP_UNLOCK[b]:
+			return CROP_UNLOCK[a] < CROP_UNLOCK[b]
+		return int(CROPS[a]["value"]) < int(CROPS[b]["value"]))
+	return idx
+
 # ---- prestige / Yeni Sezon ----
 # Stars you'd earn if you prestiged right now.
 func prestige_gain() -> int:
@@ -871,6 +906,7 @@ func do_prestige() -> int:
 	sera_level = 0
 	pazar_level = 0
 	kompost_level = 0
+	barn_level = 0
 	scarecrow_charges = 0
 	sell_boost_t = 0.0
 	water_acc = 0.0
@@ -1011,11 +1047,11 @@ func type_count(task: int) -> int:
 
 func bot_cost(task: int) -> int:
 	var base: int = TASK_BASE_COST[task]
-	return int(round(float(base) * pow(1.4, float(type_count(task)))))
+	return int(round(float(base) * pow(1.5, float(type_count(task)))))
 
 # Returns the new bot (so the view can place/animate it) or null if not bought.
 func buy_bot(task: int) -> Bot:
-	if bots.size() >= MAX_BOTS:
+	if bots.size() >= max_bots():
 		return null
 	var cost := bot_cost(task)
 	if coins < cost:
@@ -1054,16 +1090,16 @@ func buy_repair() -> bool:
 	return true
 
 func yield_cost() -> int:
-	return int(round(15.0 * pow(1.6, float(yield_level))))
+	return int(round(20.0 * pow(1.7, float(yield_level))))
 
 func speed_cost() -> int:
-	return int(round(12.0 * pow(1.6, float(speed_level))))
+	return int(round(16.0 * pow(1.7, float(speed_level))))
 
 func dura_cost() -> int:
 	return int(round(18.0 * pow(1.7, float(dura_level))))
 
 func well_cost() -> int:
-	return int(round(20.0 * pow(1.6, float(well_level))))
+	return int(round(28.0 * pow(1.7, float(well_level))))
 
 func scare_cost() -> int:
 	return 16
@@ -1072,16 +1108,19 @@ func windmill_cost() -> int:
 	return int(round(30.0 * pow(1.8, float(windmill_level))))
 
 func depo_cost() -> int:
-	return int(round(18.0 * pow(1.5, float(depo_level))))
+	return int(round(26.0 * pow(1.6, float(depo_level))))
 
 func sera_cost() -> int:
-	return int(round(28.0 * pow(1.7, float(sera_level))))
+	return int(round(42.0 * pow(1.8, float(sera_level))))
 
 func pazar_cost() -> int:
-	return int(round(35.0 * pow(1.8, float(pazar_level))))
+	return int(round(55.0 * pow(1.85, float(pazar_level))))
 
 func kompost_cost() -> int:
-	return int(round(24.0 * pow(1.6, float(kompost_level))))
+	return int(round(34.0 * pow(1.7, float(kompost_level))))
+
+func barn_cost() -> int:
+	return int(round(110.0 * pow(1.9, float(barn_level))))
 
 func buy_yield() -> bool:
 	var c := yield_cost()
@@ -1164,11 +1203,19 @@ func buy_kompost() -> bool:
 	kompost_level += 1
 	return true
 
+func buy_barn() -> bool:
+	var c := barn_cost()
+	if coins < c or max_bots() >= MAX_BOTS:
+		return false
+	coins -= c
+	barn_level += 1
+	return true
+
 func can_expand() -> bool:
 	return rows < MAX_ROWS
 
 func expand_cost() -> int:
-	return int(round(22.0 * pow(1.6, float(rows - START_ROWS))))
+	return int(round(45.0 * pow(1.8, float(rows - START_ROWS))))
 
 # Adds one new row of tiles (some obstacles). Returns the new row index or -1.
 func buy_expand() -> int:
@@ -1202,12 +1249,12 @@ func tab_items(tab: int) -> Array:
 		1:
 			return [IT_WATER, IT_REPAIR, IT_SCARE, IT_YIELD, IT_SPEED, IT_DURA, IT_WELL]
 		2:
-			return [IT_EXPAND, IT_WINDMILL, IT_DEPO, IT_SERA, IT_PAZAR, IT_KOMPOST]
+			return [IT_EXPAND, IT_AHIR, IT_WINDMILL, IT_DEPO, IT_SERA, IT_PAZAR, IT_KOMPOST]
 		_:
-			# tab 3 = crop showcase (info-only rows), one per crop
+			# tab 3 = crop showcase (info-only rows), one per crop, in tier order
 			var out: Array = []
-			for i in range(CROPS.size()):
-				out.append(IT_CROP + i)
+			for i in crop_order():
+				out.append(IT_CROP + int(i))
 			return out
 
 func item_cost(id: int) -> int:
@@ -1242,6 +1289,8 @@ func item_cost(id: int) -> int:
 			return pazar_cost()
 		IT_KOMPOST:
 			return kompost_cost()
+		IT_AHIR:
+			return barn_cost()
 	return 0
 
 func item_enabled(id: int) -> bool:
@@ -1249,12 +1298,14 @@ func item_enabled(id: int) -> bool:
 		return false   # crop showcase rows are info-only (never a buy)
 	var cost := item_cost(id)
 	if id <= GOLD_HUNT:
-		return coins >= cost and bots.size() < MAX_BOTS
+		return coins >= cost and bots.size() < max_bots()
 	match id:
 		IT_REPAIR:
 			return (not bots.is_empty()) and needs_repair() and coins >= cost
 		IT_EXPAND:
 			return can_expand() and coins >= cost
+		IT_AHIR:
+			return max_bots() < MAX_BOTS and coins >= cost
 		_:
 			return coins >= cost
 
@@ -1296,12 +1347,16 @@ func item_info(id: int) -> Array:
 			return [C_GOLD, "P", "Pazar (sv.%d)" % pazar_level, "Pasif para kazandirir (%.1f/sn/sv)" % MARKET_RATE]
 		IT_KOMPOST:
 			return [C_SOIL, "G", "Kompost (sv.%d)" % kompost_level, "Altin urun sansini +%d%% artirir" % int(KOMPOST_GOLD * 100)]
+		IT_AHIR:
+			return [Color("#9C6B3F"), "A", "Ahir (%d/%d bot)" % [max_bots(), MAX_BOTS], "Bot limitini +%d artirir" % BARN_STEP]
 	return [C_PANEL, "?", "?", ""]
 
 func item_cost_text(id: int) -> String:
 	if id >= IT_CROP:
 		return "Acik" if crop_unlocked(id - IT_CROP) else "Kilit"
 	if id == IT_EXPAND and not can_expand():
+		return "MAX"
+	if id == IT_AHIR and max_bots() >= MAX_BOTS:
 		return "MAX"
 	if id == IT_REPAIR and bots.is_empty():
 		return "-"
@@ -1342,6 +1397,8 @@ func buy_item(id: int) -> Dictionary:
 			ok = buy_pazar()
 		IT_KOMPOST:
 			ok = buy_kompost()
+		IT_AHIR:
+			ok = buy_barn()
 		IT_EXPAND:
 			row = buy_expand()
 			ok = row >= 0

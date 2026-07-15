@@ -142,9 +142,9 @@ func _initialize() -> void:
 	s = _fresh()
 	_ok("yield_mult base 1.0", abs(s.yield_mult() - 1.0) < 0.0001)
 	s.yield_level = 2
-	_ok("yield_mult +10%/lvl", abs(s.yield_mult() - 1.2) < 0.0001)
+	_ok("yield_mult +8%/lvl", abs(s.yield_mult() - 1.16) < 0.0001)
 	s.sell_boost_t = 5.0
-	_ok("sell_boost x1.5", abs(s.sell_mult() - 1.8) < 0.0001)
+	_ok("sell_boost x1.5", abs(s.sell_mult() - 1.74) < 0.0001)
 
 	# 13. buy_yield deducts cost + increments level
 	s = _fresh()
@@ -232,7 +232,7 @@ func _initialize() -> void:
 	b21.gpos = s._grid_center(t21)      # placed on the tile
 	s.tick_bots(0.05)                   # picks target, arrives, starts working
 	_ok("bot arrives and starts working", b21.state == "working" and b21.target == t21)
-	s.tick_bots(0.3)                    # work elapses -> task applied
+	s.tick_bots(0.6)                    # work elapses (WORK_TIME 0.5) -> task applied
 	_ok("TILL bot tills its zone tile", s.states[t21] == SimState.TILLED)
 	_ok("bot releases claim after work", not s.claimed[t21] and b21.target == -1)
 
@@ -281,7 +281,7 @@ func _initialize() -> void:
 	h25.zone[t25] = true
 	h25.gpos = s._grid_center(t25)
 	var stock25: int = s.stock[2]
-	s.tick_bots(0.05); s.tick_bots(0.3)
+	s.tick_bots(0.05); s.tick_bots(0.6)
 	_ok("HARVEST bot clears ripe tile", s.states[t25] == SimState.EMPTY)
 	_ok("HARVEST bot banks the crop", s.stock[2] == stock25 + 1)
 

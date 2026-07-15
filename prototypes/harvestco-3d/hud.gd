@@ -19,6 +19,7 @@ var _stars: Label
 var _milestone: Label
 var _toast: Label
 var _seed_btns: Array = []
+var _seed_order: Array = []      # display position -> crop index (tier-sorted)
 var _seed_info: Label
 var _tools_box: HBoxContainer
 var _clear_btn: Button
@@ -114,12 +115,13 @@ func build(sim: SimState) -> void:
 	var seeds := HBoxContainer.new()
 	seeds.add_theme_constant_override("separation", 6)
 	seedscroll.add_child(seeds)
-	for i in range(sim.CROPS.size()):
+	_seed_order = sim.crop_order()
+	for i in range(_seed_order.size()):
 		var b := Button.new()
 		b.custom_minimum_size = Vector2(74, 58)
 		b.add_theme_font_size_override("font_size", 14)
 		b.autowrap_mode = TextServer.AUTOWRAP_OFF
-		var idx := i
+		var idx: int = _seed_order[i]
 		b.pressed.connect(func() -> void: seed_selected.emit(idx))
 		seeds.add_child(b)
 		_seed_btns.append(b)
@@ -187,8 +189,9 @@ func refresh(sim: SimState) -> void:
 				m["desc"], sim.milestone_progress(), int(m["target"]), int(m["reward"])]
 		else:
 			_milestone.text = "Tum hedefler tamam!  Yildiz: %d" % sim.stars
-	for i in range(_seed_btns.size()):
-		var b: Button = _seed_btns[i]
+	for k in range(_seed_btns.size()):
+		var b: Button = _seed_btns[k]
+		var i: int = _seed_order[k]
 		var col: Color = sim.CROPS[i]["col"]
 		var cname: String = sim.CROPS[i]["name"]
 		var buy: int = int(sim.CROPS[i]["seed"])

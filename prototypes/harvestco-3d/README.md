@@ -225,6 +225,24 @@ maliyet üstel, gelir daha yavaş; hard caps and the missing prestige loop were 
   info-only crop rows, unlock announce, save round-trip) **PASS**; `STORE_SHOT` screenshots of the
   Binalar + Urunler tabs and `PLAY_SHOT` (3 new buildings in the scene) confirmed on-screen.
 
+## Pacing pass #2 + more variety (playtest: "still develops too fast / low variety") ✓
+A full autoplayer economy sim (`_autoplay.gd`) revealed the real problem: the **whole toolkit**
+(max field, 30 bots, all buildings) was acquired in ~3–10 min — income out-ran every cost. Fixes:
+- **Bot flood gated by a new building — Ahır (Barn)**: the bot cap is now `max_bots() = 8..→ 5 +
+  barn_level×2` (was a flat 30). You must invest in Barns to run a big workforce. This alone moved
+  "max bots" from ~3 min to ~18 min in the sim and made the early economy tight (a real build-up).
+- **Slower farm throughput**: `WORK_TIME` 0.25→0.5s, so the farm produces at a more human pace.
+- **Steeper cost curves** across bots (1.4→1.5), expansion (×22/1.6 → ×45/1.8), yield/speed/well/
+  sera/pazar/kompost, and a steep new Barn curve — so money always has a next goal.
+- **+4 crops (13→17)** for variety: Marul, Biber (open early) + Nar, Ananas (premium). Crop unlock
+  thresholds re-spread up to **90 000 lifetime harvests** (multi-day endgame). The seed picker and
+  store crop tab now render in **tier order** (`crop_order`), so appended crops slot in correctly;
+  `_check_unlocks` walks tier order too.
+- **Sim-measured result**: full field ~15 min, max bots ~18 min, early premium crops as rewards
+  (1–12 min), deep crops 30 min → many hours, top crops multi-day; prestige 10★ ~35 min, 25★ hours.
+  Verified `test_sim.gd` 70/70 + `test_meta.gd` PASS (incl. barn cap + tier-order unlocks); the
+  Ahır 3D barn + tier-sorted seed picker + Binalar tab confirmed on-screen.
+
 ## Duration pass — measured playtime, then extended it ✓
 A headless autoplayer (`_autoplay.gd`: manual-tap bootstrap → greedy bot-driven reinvestment, seeded)
 was written to **measure** how long the content actually lasts. First run exposed the real problem:

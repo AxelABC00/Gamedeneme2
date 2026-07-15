@@ -1482,6 +1482,7 @@ func _build_props() -> void:
 	_build_kompost(Vector3(-3.0, 0.0, back_z + 0.2))
 	_build_sera(Vector3(0.4, 0.0, back_z - 0.5))
 	_build_pazar(Vector3(2.85, 0.0, back_z + 0.15))
+	_build_barn(Vector3(5.4, 0.0, back_z - 0.3))
 
 	_build_scenery(back_z)
 
@@ -1541,6 +1542,31 @@ func _build_pazar(at: Vector3) -> void:
 		crate.position = Vector3(cxs[i], 0.8, 0.2); root.add_child(crate)
 		var good := _ball_node(goods[i], 0.12, 0.7)
 		good.position = Vector3(cxs[i], 0.98, 0.2); root.add_child(good)
+
+# Ahir (Barn): a classic red barn with a gable roof, big door and white trim.
+func _build_barn(at: Vector3) -> void:
+	var root := Node3D.new(); _homestead.add_child(root); root.position = at
+	var red := Color("#A8402F")
+	var red_dk := Color("#7E2C22")
+	var body := _box_node(Vector3(1.7, 1.3, 1.5), red)
+	body.position = Vector3(0, 0.65, 0); root.add_child(body)
+	var roof := MeshInstance3D.new()
+	var pm := PrismMesh.new(); pm.size = Vector3(1.95, 0.75, 1.6)
+	roof.mesh = pm
+	roof.material_override = _mat(red_dk, 0.8)
+	roof.position = Vector3(0, 1.68, 0); root.add_child(roof)
+	# big front door (dark) with white trim + the classic white X
+	var door := _box_node(Vector3(0.66, 0.95, 0.06), Color("#5B2018"), 0.8)
+	door.position = Vector3(0, 0.48, 0.76); root.add_child(door)
+	var white := Color("#EDE6D2")
+	for tr in [[Vector3(0.66, 0.07, 0.02), Vector3(0, 0.95, 0.79)],
+			[Vector3(0.07, 0.95, 0.02), Vector3(-0.33, 0.48, 0.79)],
+			[Vector3(0.07, 0.95, 0.02), Vector3(0.33, 0.48, 0.79)]]:
+		var t := _box_node(tr[0], white, 0.6)
+		t.position = tr[1]; root.add_child(t)
+	# little hayloft opening near the roof peak
+	var loft := _box_node(Vector3(0.4, 0.4, 0.06), Color("#5B2018"), 0.8)
+	loft.position = Vector3(0, 1.35, 0.77); root.add_child(loft)
 
 # Kompost (compost bin): a small wooden bin with a dark mulch mound and green scraps.
 func _build_kompost(at: Vector3) -> void:

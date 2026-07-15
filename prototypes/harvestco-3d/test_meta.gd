@@ -9,10 +9,10 @@ func _init():
 	# --- crop unlocks ---
 	if not s.crop_unlocked(0): ok = false; print("FAIL crop0 should be unlocked")
 	if s.crop_unlocked(7): ok = false; print("FAIL crop7 (Cilek) should be locked at harvested=0")
-	if s.crop_count() != 13: ok = false; print("FAIL crop_count ", s.crop_count())
+	if s.crop_count() != 17: ok = false; print("FAIL crop_count ", s.crop_count())
 	s.harvested = 60
-	if not s.crop_unlocked(7): ok = false; print("FAIL crop7 should unlock at harvested=60")
-	if s.crop_unlocked(8): ok = false; print("FAIL crop8 should still be locked at 60")
+	if not s.crop_unlocked(7): ok = false; print("FAIL crop7 (Cilek) should unlock at harvested=60")
+	if s.crop_unlocked(8): ok = false; print("FAIL crop8 (Misir) should still be locked at 60")
 
 	# --- earn + prestige gain ---
 	s.season_earned = 0
@@ -62,8 +62,8 @@ func _init():
 	# greenhouse growth multiplier
 	c.sera_level = 2
 	if abs(c.growth_mult() - 1.3) > 0.001: ok = false; print("FAIL growth_mult ", c.growth_mult())
-	# market passive coin trickle: pazar 2 * 0.5/s * 1s = 1 coin
-	c.pazar_level = 2
+	# market passive coin trickle: pazar 4 * MARKET_RATE(0.3)/s * 1s = 1.2 -> 1 coin
+	c.pazar_level = 4
 	var cbefore = c.coins
 	var sbefore = c.season_earned
 	c.tick(1.0)
@@ -75,12 +75,12 @@ func _init():
 	# buy funcs increment levels
 	c.coins = 100000
 	if not c.buy_sera() or c.sera_level != 3: ok = false; print("FAIL buy_sera")
-	if not c.buy_pazar() or c.pazar_level != 3: ok = false; print("FAIL buy_pazar")
+	if not c.buy_pazar() or c.pazar_level != 5: ok = false; print("FAIL buy_pazar")
 	if not c.buy_kompost() or c.kompost_level != 6: ok = false; print("FAIL buy_kompost")
 
 	# --- store model: crops tab + building tab + info-only crop rows ---
 	var crop_tab = c.tab_items(3)
-	if crop_tab.size() != 13: ok = false; print("FAIL crop tab size ", crop_tab.size())
+	if crop_tab.size() != 17: ok = false; print("FAIL crop tab size ", crop_tab.size())
 	if int(crop_tab[0]) != c.IT_CROP: ok = false; print("FAIL crop tab first id ", crop_tab[0])
 	var bld_tab = c.tab_items(2)
 	if not (c.IT_SERA in bld_tab and c.IT_PAZAR in bld_tab and c.IT_KOMPOST in bld_tab):
@@ -92,16 +92,25 @@ func _init():
 	if c.buy_item(c.IT_CROP + 0)["bought"]: ok = false; print("FAIL crop row should not be buyable")
 
 	# --- unlock announce ---
-	c.unlocked_seen = 7
+	# tier order: 8 open-from-start crops (unlock 0), then Cilek(60) at position 8
+	c.unlocked_seen = 0
 	c.harvested = 60
 	if not c._check_unlocks(): ok = false; print("FAIL _check_unlocks should fire at 60")
-	if c.unlocked_seen != 8: ok = false; print("FAIL unlocked_seen ", c.unlocked_seen)
+	if c.unlocked_seen != 9: ok = false; print("FAIL unlocked_seen ", c.unlocked_seen)
+
+	# --- barn raises the bot cap ---
+	var bn = Sim.new(); bn.new_game()
+	if bn.max_bots() != bn.BOT_CAP_BASE: ok = false; print("FAIL base max_bots ", bn.max_bots())
+	bn.coins = 100000
+	if not bn.buy_barn() or bn.barn_level != 1: ok = false; print("FAIL buy_barn")
+	if bn.max_bots() != bn.BOT_CAP_BASE + bn.BARN_STEP: ok = false; print("FAIL max_bots after barn ", bn.max_bots())
 
 	# --- save round-trip of the new building fields ---
-	c.sera_level = 4; c.pazar_level = 2; c.kompost_level = 3; c.unlocked_seen = 9
+	c.sera_level = 4; c.pazar_level = 2; c.kompost_level = 3; c.barn_level = 5; c.unlocked_seen = 9
 	var e = Sim.new()
 	e.from_dict(JSON.parse_string(JSON.stringify(c.to_dict())))
 	if e.sera_level != 4 or e.pazar_level != 2 or e.kompost_level != 3: ok = false; print("FAIL save building levels")
+	if e.barn_level != 5: ok = false; print("FAIL save barn_level ", e.barn_level)
 	if e.unlocked_seen != 9: ok = false; print("FAIL save unlocked_seen ", e.unlocked_seen)
 
 	print("SIMTEST ", "PASS" if ok else "FAIL")

@@ -136,15 +136,16 @@ func _buy_pass() -> void:
 		["yield", s.yield_cost(), s.yield_level < 10],
 		["speed", s.speed_cost(), s.speed_level < 8],
 		["expand", s.expand_cost(), s.can_expand()],
-		["harvest", s.bot_cost(HARVEST), s.type_count(HARVEST) < 9 and s.bots.size() < s.MAX_BOTS],
-		["plant", s.bot_cost(PLANT), s.type_count(PLANT) < 7 and s.bots.size() < s.MAX_BOTS],
-		["water", s.bot_cost(WATER), s.type_count(WATER) < 6 and s.bots.size() < s.MAX_BOTS],
-		["till", s.bot_cost(TILL), s.type_count(TILL) < 6 and s.bots.size() < s.MAX_BOTS],
+		["barn", s.barn_cost(), s.bots.size() >= s.max_bots() - 1 and s.max_bots() < s.MAX_BOTS],
+		["harvest", s.bot_cost(HARVEST), s.type_count(HARVEST) < 9 and s.bots.size() < s.max_bots()],
+		["plant", s.bot_cost(PLANT), s.type_count(PLANT) < 7 and s.bots.size() < s.max_bots()],
+		["water", s.bot_cost(WATER), s.type_count(WATER) < 6 and s.bots.size() < s.max_bots()],
+		["till", s.bot_cost(TILL), s.type_count(TILL) < 6 and s.bots.size() < s.max_bots()],
 		["depot", s.depo_cost(), s.storage_cap < 200],
 		["pazar", s.pazar_cost(), s.pazar_level < 6],
 		["kompost", s.kompost_cost(), s.kompost_level < 6],
 		["windmill", s.windmill_cost(), s.windmill_level < 3],
-		["clean", s.bot_cost(CLEAN), s.type_count(CLEAN) < 2 and s.bots.size() < s.MAX_BOTS],
+		["clean", s.bot_cost(CLEAN), s.type_count(CLEAN) < 2 and s.bots.size() < s.max_bots()],
 	]
 	# buy the cheapest eligible plan we can afford (keeps steady reinvestment)
 	var best_name := ""
@@ -153,6 +154,7 @@ func _buy_pass() -> void:
 		if p[2] and int(p[1]) < best_cost and s.coins - int(p[1]) >= buffer:
 			best_cost = int(p[1]); best_name = p[0]
 	match best_name:
+		"barn": s.buy_barn()
 		"well": s.buy_well()
 		"sera": s.buy_sera()
 		"yield": s.buy_yield()
