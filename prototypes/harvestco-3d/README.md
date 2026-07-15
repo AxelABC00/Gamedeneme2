@@ -243,6 +243,20 @@ A full autoplayer economy sim (`_autoplay.gd`) revealed the real problem: the **
   Verified `test_sim.gd` 70/70 + `test_meta.gd` PASS (incl. barn cap + tier-order unlocks); the
   Ahır 3D barn + tier-sorted seed picker + Binalar tab confirmed on-screen.
 
+## Pause-button fix + more content ✓
+- **Bug fix**: the in-game pause button (II) lives on a higher CanvasLayer than the store/tutorial
+  overlays, so it floated on top of them. `world._process` now hides it whenever an overlay is up
+  (`_store.is_open()` or an active tutorial), covering every open/close path.
+- **+2 buildings (17→? total content)**: **Su Kulesi** (water tower) raises the water cap
+  (`water_cap()` = 99 + level×40; all WATER_MAX checks route through it) and **Nakliye** (shipping
+  depot) auto-sells stored crops on a timer (`SHIP_BASE/level` seconds) — an idle convenience.
+  Both persist in save/load, reset on prestige, and have low-poly 3D models in the homestead band.
+- **+3 crops (17→20)**: Havuç (basic), Kavun (mid), Vanilya (ultra-endgame, unlock 150 000). The
+  seed picker/store stay tier-sorted via `crop_order`.
+- Verified: `test_sim.gd` 70/70 + `test_meta.gd` PASS (water-cap, shipping auto-sell, 20-crop
+  counts, tier-order unlocks, save round-trip); pause-button-hidden-over-store + the water tower +
+  Nakliye truck confirmed on-screen.
+
 ## Duration pass — measured playtime, then extended it ✓
 A headless autoplayer (`_autoplay.gd`: manual-tap bootstrap → greedy bot-driven reinvestment, seeded)
 was written to **measure** how long the content actually lasts. First run exposed the real problem:

@@ -121,6 +121,11 @@ func _show_settings(from_pause: bool) -> void:
 
 # ---------------------------------------------------------------- in-game pause button
 
+# Public: show/hide the in-game pause button (world hides it while an overlay is up).
+func show_pause_button(v: bool) -> void:
+	if _pause_btn != null:
+		_pause_btn.visible = v
+
 func _set_pause_visible(v: bool) -> void:
 	if v and _pause_btn == null:
 		_pause_btn = Button.new()

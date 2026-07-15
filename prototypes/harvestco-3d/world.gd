@@ -353,7 +353,7 @@ func _on_buy_water() -> void:
 	if sim.buy_water():
 		_hud.refresh(sim)
 		_hud.toast("Su +%d" % sim.WATER_BUNDLE)
-	elif sim.water >= sim.WATER_MAX:
+	elif sim.water >= sim.water_cap():
 		_hud.toast("Su deposu dolu")
 	else:
 		_hud.toast("Para yetmiyor")
@@ -378,6 +378,12 @@ func _on_clear_zone() -> void:
 func _process(delta: float) -> void:
 	if not _started or _paused or sim == null:
 		return
+	# keep the pause button hidden whenever a full-screen overlay is up (store / tutorial),
+	# otherwise it floats on top of them (it lives on a higher CanvasLayer)
+	if _menu != null:
+		var overlay_up: bool = (_store != null and _store.is_open()) \
+			or (_tutorial != null and is_instance_valid(_tutorial))
+		_menu.show_pause_button(not overlay_up)
 	_autosave_t += delta
 	if _autosave_t >= 20.0:
 		_autosave_t = 0.0
@@ -1483,6 +1489,8 @@ func _build_props() -> void:
 	_build_sera(Vector3(0.4, 0.0, back_z - 0.5))
 	_build_pazar(Vector3(2.85, 0.0, back_z + 0.15))
 	_build_barn(Vector3(5.4, 0.0, back_z - 0.3))
+	_build_sukule(Vector3(-2.1, 0.0, back_z - 2.6))
+	_build_nakliye(Vector3(3.7, 0.0, back_z + 1.5))
 
 	_build_scenery(back_z)
 
@@ -1542,6 +1550,47 @@ func _build_pazar(at: Vector3) -> void:
 		crate.position = Vector3(cxs[i], 0.8, 0.2); root.add_child(crate)
 		var good := _ball_node(goods[i], 0.12, 0.7)
 		good.position = Vector3(cxs[i], 0.98, 0.2); root.add_child(good)
+
+# Su Kulesi (Water Tower): a tall tank on four legs with a conical cap.
+func _build_sukule(at: Vector3) -> void:
+	var root := Node3D.new(); _homestead.add_child(root); root.position = at
+	var metal := Color("#8FA6B0")
+	for lx in [-0.32, 0.32]:
+		for lz in [-0.32, 0.32]:
+			var leg := _cyl_node(Color("#6E7B82"), 0.05, 1.7)
+			leg.position = Vector3(lx, 0.85, lz); root.add_child(leg)
+	# cross-braces (thin slanted bars) for a bit of structure
+	for bz in [-0.32, 0.32]:
+		var brace := _box_node(Vector3(0.72, 0.04, 0.04), Color("#6E7B82"), 0.6)
+		brace.position = Vector3(0, 0.85, bz); root.add_child(brace)
+	var tank := _cyl_node(metal, 0.5, 0.7)
+	tank.position = Vector3(0, 2.0, 0); root.add_child(tank)
+	var band := _cyl_node(Color("#5FA0C4"), 0.52, 0.18)
+	band.position = Vector3(0, 1.95, 0); root.add_child(band)
+	var cap := MeshInstance3D.new()
+	var cm := CylinderMesh.new(); cm.top_radius = 0.0; cm.bottom_radius = 0.56; cm.height = 0.34; cm.radial_segments = 12
+	cap.mesh = cm
+	cap.material_override = _mat(Color("#4E6A76"), 0.7)
+	cap.position = Vector3(0, 2.5, 0); root.add_child(cap)
+
+# Nakliye (Shipping Depot): a little flatbed truck with crates.
+func _build_nakliye(at: Vector3) -> void:
+	var root := Node3D.new(); _homestead.add_child(root); root.position = at
+	var cargo := _box_node(Vector3(1.0, 0.55, 0.72), Color("#7C5A34"))
+	cargo.position = Vector3(0.25, 0.55, 0); root.add_child(cargo)
+	var cab := _box_node(Vector3(0.5, 0.55, 0.7), Color("#3C6E9C"))
+	cab.position = Vector3(-0.5, 0.5, 0); root.add_child(cab)
+	# wheels (cylinders laid on their side, axis along the truck width)
+	for wx in [-0.5, 0.35]:
+		for wz in [-0.36, 0.36]:
+			var wheel := _cyl_node(Color("#2C2A28"), 0.17, 0.12)
+			wheel.rotation_degrees = Vector3(90, 0, 0)
+			wheel.position = Vector3(wx, 0.17, wz); root.add_child(wheel)
+	# a couple of crates on the flatbed
+	var cols := [Color("#C0803A"), Color("#9A6B30")]
+	for i in range(2):
+		var crate := _box_node(Vector3(0.32, 0.3, 0.32), cols[i], 0.8)
+		crate.position = Vector3(0.05 + i * 0.4, 0.98, 0.0); root.add_child(crate)
 
 # Ahir (Barn): a classic red barn with a gable roof, big door and white trim.
 func _build_barn(at: Vector3) -> void:

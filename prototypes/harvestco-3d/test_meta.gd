@@ -9,7 +9,7 @@ func _init():
 	# --- crop unlocks ---
 	if not s.crop_unlocked(0): ok = false; print("FAIL crop0 should be unlocked")
 	if s.crop_unlocked(7): ok = false; print("FAIL crop7 (Cilek) should be locked at harvested=0")
-	if s.crop_count() != 17: ok = false; print("FAIL crop_count ", s.crop_count())
+	if s.crop_count() != 20: ok = false; print("FAIL crop_count ", s.crop_count())
 	s.harvested = 60
 	if not s.crop_unlocked(7): ok = false; print("FAIL crop7 (Cilek) should unlock at harvested=60")
 	if s.crop_unlocked(8): ok = false; print("FAIL crop8 (Misir) should still be locked at 60")
@@ -80,7 +80,7 @@ func _init():
 
 	# --- store model: crops tab + building tab + info-only crop rows ---
 	var crop_tab = c.tab_items(3)
-	if crop_tab.size() != 17: ok = false; print("FAIL crop tab size ", crop_tab.size())
+	if crop_tab.size() != 20: ok = false; print("FAIL crop tab size ", crop_tab.size())
 	if int(crop_tab[0]) != c.IT_CROP: ok = false; print("FAIL crop tab first id ", crop_tab[0])
 	var bld_tab = c.tab_items(2)
 	if not (c.IT_SERA in bld_tab and c.IT_PAZAR in bld_tab and c.IT_KOMPOST in bld_tab):
@@ -92,25 +92,38 @@ func _init():
 	if c.buy_item(c.IT_CROP + 0)["bought"]: ok = false; print("FAIL crop row should not be buyable")
 
 	# --- unlock announce ---
-	# tier order: 8 open-from-start crops (unlock 0), then Cilek(60) at position 8
+	# tier order: 9 open-from-start crops (unlock 0), then Cilek(60) at position 9
 	c.unlocked_seen = 0
 	c.harvested = 60
 	if not c._check_unlocks(): ok = false; print("FAIL _check_unlocks should fire at 60")
-	if c.unlocked_seen != 9: ok = false; print("FAIL unlocked_seen ", c.unlocked_seen)
+	if c.unlocked_seen != 10: ok = false; print("FAIL unlocked_seen ", c.unlocked_seen)
 
 	# --- barn raises the bot cap ---
 	var bn = Sim.new(); bn.new_game()
 	if bn.max_bots() != bn.BOT_CAP_BASE: ok = false; print("FAIL base max_bots ", bn.max_bots())
-	bn.coins = 100000
+	bn.coins = 1000000
 	if not bn.buy_barn() or bn.barn_level != 1: ok = false; print("FAIL buy_barn")
 	if bn.max_bots() != bn.BOT_CAP_BASE + bn.BARN_STEP: ok = false; print("FAIL max_bots after barn ", bn.max_bots())
+	# --- water tower raises water cap ---
+	var wc0 = bn.water_cap()
+	if not bn.buy_sukule() or bn.sukule_level != 1: ok = false; print("FAIL buy_sukule")
+	if bn.water_cap() != wc0 + bn.SUKULE_WATER: ok = false; print("FAIL water_cap after tower ", bn.water_cap())
+	# --- shipping depot auto-sells stock over time ---
+	bn.buy_nakliye()   # level 1 -> ships every SHIP_BASE/1 = 6s
+	bn.stock[0] = 6
+	var nc0 = bn.coins
+	bn.tick(6.5)
+	if bn.stock_total() != 0: ok = false; print("FAIL nakliye should auto-sell stock ", bn.stock_total())
+	if bn.coins <= nc0: ok = false; print("FAIL nakliye should add coins")
 
 	# --- save round-trip of the new building fields ---
 	c.sera_level = 4; c.pazar_level = 2; c.kompost_level = 3; c.barn_level = 5; c.unlocked_seen = 9
+	c.sukule_level = 3; c.nakliye_level = 2
 	var e = Sim.new()
 	e.from_dict(JSON.parse_string(JSON.stringify(c.to_dict())))
 	if e.sera_level != 4 or e.pazar_level != 2 or e.kompost_level != 3: ok = false; print("FAIL save building levels")
 	if e.barn_level != 5: ok = false; print("FAIL save barn_level ", e.barn_level)
+	if e.sukule_level != 3 or e.nakliye_level != 2: ok = false; print("FAIL save water/shipping levels")
 	if e.unlocked_seen != 9: ok = false; print("FAIL save unlocked_seen ", e.unlocked_seen)
 
 	print("SIMTEST ", "PASS" if ok else "FAIL")

@@ -54,12 +54,16 @@ const IT_SERA := 16          # greenhouse — speeds crop growth
 const IT_PAZAR := 17         # market stall — passive coin income
 const IT_KOMPOST := 18       # compost — raises the golden-crop chance on every harvest
 const IT_AHIR := 19          # barn — raises the bot cap (max_bots)
+const IT_SUKULE := 20        # water tower — raises the water capacity
+const IT_NAKLIYE := 21       # shipping depot — auto-sells stored crops periodically
 const IT_CROP := 100         # crop showcase rows (IT_CROP + crop index); info-only, no buy
 
 # new-building tuning
 const SERA_GROWTH := 0.15    # +15% growth rate per greenhouse level
 const MARKET_RATE := 0.3     # passive coins/sec per market level
 const KOMPOST_GOLD := 0.02   # +2% golden chance per compost level (on every harvest)
+const SUKULE_WATER := 40     # +40 water capacity per water-tower level
+const SHIP_BASE := 6.0       # shipping auto-sells every SHIP_BASE/level seconds
 
 # Store palette accents (ported; the 3D store reads these for row tinting)
 const C_SOIL := Color("#7B5B3A")
@@ -93,11 +97,15 @@ const CROPS := [
 	{"name": "Biber", "grow": 10.0, "value": 22, "seed": 6, "col": Color("#D8433B")},
 	{"name": "Nar", "grow": 22.0, "value": 150, "seed": 40, "col": Color("#B33049")},
 	{"name": "Ananas", "grow": 30.0, "value": 420, "seed": 110, "col": Color("#E6B325")},
+	{"name": "Havuc", "grow": 5.0, "value": 8, "seed": 2, "col": Color("#E08A3C")},
+	{"name": "Kavun", "grow": 12.0, "value": 30, "seed": 8, "col": Color("#B7C96A")},
+	{"name": "Vanilya", "grow": 45.0, "value": 850, "seed": 220, "col": Color("#E7DCA6")},
 ]
 # crops unlock as lifetime `harvested` climbs — discovery + a reason to keep harvesting.
 # tuned against the autoplay sim so the ladder spans a long session, not 5 minutes.
 # order matches CROPS: [7 basics..] Cilek Misir Aycicek AltinElma Mantar Ejder | Marul Biber Nar Ananas
-const CROP_UNLOCK := [0, 0, 0, 0, 0, 0, 0, 60, 500, 2400, 9000, 32000, 90000, 0, 150, 5000, 55000]
+# [7 basics..] Cilek Misir Aycicek AltinElma Mantar Ejder | Marul Biber Nar Ananas | Havuc Kavun Vanilya
+const CROP_UNLOCK := [0, 0, 0, 0, 0, 0, 0, 60, 500, 2400, 9000, 32000, 90000, 0, 150, 5000, 55000, 0, 800, 150000]
 
 # --- economy constants (ported) ---
 const WHEAT := 3            # CROPS index of Bugday (sold as flour when a mill exists)
@@ -199,7 +207,10 @@ var sera_level: int = 0             # greenhouse (growth speed)
 var pazar_level: int = 0            # market (passive coins)
 var kompost_level: int = 0         # compost (golden chance)
 var barn_level: int = 0            # barn (raises the bot cap)
+var sukule_level: int = 0          # water tower (raises water capacity)
+var nakliye_level: int = 0         # shipping depot (auto-sells stock)
 var coin_acc: float = 0.0          # market passive-coin fractional accumulator
+var ship_acc: float = 0.0          # shipping auto-sell timer accumulator
 var unlocked_seen: int = 0         # tier-sorted crops already passed by _check_unlocks
 var scarecrow_charges: int = 0
 var sell_boost_t: float = 0.0      # trader event boost (set in Phase H events)
@@ -318,14 +329,14 @@ func to_dict() -> Dictionary:
 		"dura_level": dura_level, "well_level": well_level,
 		"windmill_level": windmill_level, "depo_level": depo_level,
 		"sera_level": sera_level, "pazar_level": pazar_level, "kompost_level": kompost_level,
-		"barn_level": barn_level,
+		"barn_level": barn_level, "sukule_level": sukule_level, "nakliye_level": nakliye_level,
 		"scarecrow_charges": scarecrow_charges,
 		"event_timer": event_timer,
 		"stars": stars,
 		"season_earned": season_earned,
 		"milestone_idx": milestone_idx,
 		"unlocked_seen": unlocked_seen,
-		"water_acc": water_acc, "mill_acc": mill_acc, "coin_acc": coin_acc,
+		"water_acc": water_acc, "mill_acc": mill_acc, "coin_acc": coin_acc, "ship_acc": ship_acc,
 		"bots": bot_list,
 	}
 
@@ -359,6 +370,8 @@ func from_dict(d: Dictionary) -> void:
 	pazar_level = int(d.get("pazar_level", 0))
 	kompost_level = int(d.get("kompost_level", 0))
 	barn_level = int(d.get("barn_level", 0))
+	sukule_level = int(d.get("sukule_level", 0))
+	nakliye_level = int(d.get("nakliye_level", 0))
 	scarecrow_charges = int(d.get("scarecrow_charges", 0))
 	stars = int(d.get("stars", 0))
 	season_earned = int(d.get("season_earned", 0))
@@ -367,6 +380,7 @@ func from_dict(d: Dictionary) -> void:
 	water_acc = float(d.get("water_acc", 0.0))
 	mill_acc = float(d.get("mill_acc", 0.0))
 	coin_acc = float(d.get("coin_acc", 0.0))
+	ship_acc = float(d.get("ship_acc", 0.0))
 	event_timer = float(d.get("event_timer", randf_range(EVENT_MIN, EVENT_MAX)))
 	rain_t = 0.0; ufo_active = false; birds_active = false; sell_boost_t = 0.0
 	bots.clear()
@@ -420,9 +434,9 @@ func tick(delta: float) -> bool:
 				changed = true
 
 	# Passive buildings (ported): well makes water, windmill turns wheat into flour.
-	if well_level > 0 and water < WATER_MAX:
+	if well_level > 0 and water < water_cap():
 		water_acc += float(well_level) * WELL_RATE * delta
-		while water_acc >= 1.0 and water < WATER_MAX:
+		while water_acc >= 1.0 and water < water_cap():
 			water += 1
 			water_acc -= 1.0
 	if windmill_level > 0 and int(stock[WHEAT]) > 0:
@@ -438,6 +452,14 @@ func tick(delta: float) -> bool:
 			var whole := int(coin_acc)
 			coin_acc -= float(whole)
 			_earn(whole)
+	# shipping depot: auto-sell stored crops on a timer (faster per level)
+	if nakliye_level > 0:
+		ship_acc += delta
+		var interval: float = SHIP_BASE / float(nakliye_level)
+		if ship_acc >= interval:
+			ship_acc = 0.0
+			if stock_total() > 0:
+				sell_all()
 
 	if sell_boost_t > 0.0:
 		sell_boost_t = max(sell_boost_t - delta, 0.0)
@@ -527,7 +549,7 @@ func _trigger_event() -> void:
 	var r: int = pool[randi() % pool.size()]
 	match r:
 		0:
-			water = min(water + RAIN_WATER, WATER_MAX)
+			water = min(water + RAIN_WATER, water_cap())
 			rain_t = RAIN_DUR
 			# rain waters every planted tile for free (PLANTED -> GROWING), so it
 			# visibly "wets the soil" and pushes the whole field along at once.
@@ -862,6 +884,10 @@ func crop_count() -> int:
 func max_bots() -> int:
 	return min(MAX_BOTS, BOT_CAP_BASE + barn_level * BARN_STEP)
 
+# water capacity (base + water towers)
+func water_cap() -> int:
+	return WATER_MAX + sukule_level * SUKULE_WATER
+
 # crop indices sorted for display: by unlock threshold, then value. Lets us append new
 # crops anywhere in CROPS while the seed picker / store still show them in tier order.
 func crop_order() -> Array:
@@ -907,6 +933,9 @@ func do_prestige() -> int:
 	pazar_level = 0
 	kompost_level = 0
 	barn_level = 0
+	sukule_level = 0
+	nakliye_level = 0
+	ship_acc = 0.0
 	scarecrow_charges = 0
 	sell_boost_t = 0.0
 	water_acc = 0.0
@@ -1010,10 +1039,10 @@ func sell_all() -> int:
 # Buy one water bundle. Returns true if affordable AND the tank isn't already full
 # (don't charge coins for water that would overflow the cap).
 func buy_water() -> bool:
-	if coins < WATER_COST or water >= WATER_MAX:
+	if coins < WATER_COST or water >= water_cap():
 		return false
 	coins -= WATER_COST
-	water = min(water + WATER_BUNDLE, WATER_MAX)
+	water = min(water + WATER_BUNDLE, water_cap())
 	return true
 
 func needs(task: int, s: int) -> bool:
@@ -1122,6 +1151,12 @@ func kompost_cost() -> int:
 func barn_cost() -> int:
 	return int(round(110.0 * pow(1.9, float(barn_level))))
 
+func sukule_cost() -> int:
+	return int(round(45.0 * pow(1.7, float(sukule_level))))
+
+func nakliye_cost() -> int:
+	return int(round(80.0 * pow(1.8, float(nakliye_level))))
+
 func buy_yield() -> bool:
 	var c := yield_cost()
 	if coins < c:
@@ -1211,6 +1246,22 @@ func buy_barn() -> bool:
 	barn_level += 1
 	return true
 
+func buy_sukule() -> bool:
+	var c := sukule_cost()
+	if coins < c:
+		return false
+	coins -= c
+	sukule_level += 1
+	return true
+
+func buy_nakliye() -> bool:
+	var c := nakliye_cost()
+	if coins < c:
+		return false
+	coins -= c
+	nakliye_level += 1
+	return true
+
 func can_expand() -> bool:
 	return rows < MAX_ROWS
 
@@ -1249,7 +1300,7 @@ func tab_items(tab: int) -> Array:
 		1:
 			return [IT_WATER, IT_REPAIR, IT_SCARE, IT_YIELD, IT_SPEED, IT_DURA, IT_WELL]
 		2:
-			return [IT_EXPAND, IT_AHIR, IT_WINDMILL, IT_DEPO, IT_SERA, IT_PAZAR, IT_KOMPOST]
+			return [IT_EXPAND, IT_AHIR, IT_SUKULE, IT_NAKLIYE, IT_WINDMILL, IT_DEPO, IT_SERA, IT_PAZAR, IT_KOMPOST]
 		_:
 			# tab 3 = crop showcase (info-only rows), one per crop, in tier order
 			var out: Array = []
@@ -1291,6 +1342,10 @@ func item_cost(id: int) -> int:
 			return kompost_cost()
 		IT_AHIR:
 			return barn_cost()
+		IT_SUKULE:
+			return sukule_cost()
+		IT_NAKLIYE:
+			return nakliye_cost()
 	return 0
 
 func item_enabled(id: int) -> bool:
@@ -1349,6 +1404,10 @@ func item_info(id: int) -> Array:
 			return [C_SOIL, "G", "Kompost (sv.%d)" % kompost_level, "Altin urun sansini +%d%% artirir" % int(KOMPOST_GOLD * 100)]
 		IT_AHIR:
 			return [Color("#9C6B3F"), "A", "Ahir (%d/%d bot)" % [max_bots(), MAX_BOTS], "Bot limitini +%d artirir" % BARN_STEP]
+		IT_SUKULE:
+			return [C_WATER, "T", "Su Kulesi (sv.%d)" % sukule_level, "Su kapasitesini +%d artirir" % SUKULE_WATER]
+		IT_NAKLIYE:
+			return [C_GOLD, "N", "Nakliye (sv.%d)" % nakliye_level, "Depodaki urunleri otomatik satar"]
 	return [C_PANEL, "?", "?", ""]
 
 func item_cost_text(id: int) -> String:
@@ -1399,6 +1458,10 @@ func buy_item(id: int) -> Dictionary:
 			ok = buy_kompost()
 		IT_AHIR:
 			ok = buy_barn()
+		IT_SUKULE:
+			ok = buy_sukule()
+		IT_NAKLIYE:
+			ok = buy_nakliye()
 		IT_EXPAND:
 			row = buy_expand()
 			ok = row >= 0
